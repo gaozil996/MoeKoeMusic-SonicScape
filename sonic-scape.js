@@ -44,9 +44,9 @@ function defaultState() {
       bass:   { on: false, freq: 90, amount: 0.6 },
       eq:     { bands: defaultBands() },
       excite: { type: 'off', drive: 0.4, air: 0 },
-      comp:   { th: -24, knee: 8, ratio: 4, at: 0.008, rel: 0.2, makeup: 2, limiter: true, ceiling: -1 },
-      reverb: { ir: 'none', wet: 0.2, predelay: 20, size: 2.0 },
-      stereo: { width: 0, mid: 0, side: 0, sideLowcut: 0 },
+      comp:   { th: -28, knee: 3, ratio: 6, at: 0.003, rel: 0.15, makeup: 4, limiter: true, ceiling: -1 },
+      reverb: { ir: 'room', wet: 0.3, predelay: 18, size: 2.0 },
+      stereo: { width: 0.25, mid: 0, side: 0, sideLowcut: 0 },
       output: { gain: 0 }
     },
     smart: false
@@ -141,7 +141,10 @@ var PRESETS = [
   P({ id: 'm_master', name: '母带微光', group: '监听', modules: { eq: EQ([1, 0, 0, 0, 0, 0, 0, 1, 1, 2]), excite: { type: 'soft', drive: 0.2, air: 3 }, comp: { th: -18, ratio: 2.5, makeup: 2 } } }),
   P({ id: 'm_trans', name: '通透清晰度', group: '监听', modules: { eq: EQ([-1, -1, 0, 0, 0, 1, 2, 3, 4, 5]), excite: { type: 'soft', drive: 0.25, air: 6 } } }),
 
-  P({ id: 'off', name: '关闭(原音)', group: '基础', modules: {} })
+  P({ id: 'off', name: '关闭(原音)', group: '基础', modules: {
+    eq: EQ([0,0,0,0,0,0,0,0,0,0]), comp: { th: 0, knee: 0, ratio: 1, at: 0.01, rel: 0.25, makeup: 0, limiter: false, ceiling: 0 },
+    reverb: { ir: 'none', wet: 0 }, stereo: { width: 0, mid: 0, side: 0, sideLowcut: 0 },
+    bass: { on: false }, excite: { type: 'off', drive: 0, air: 0 }, input: { autoLoud: false, gain: 0 }, output: { gain: 0 } } })
 ];
 var GROUPS = ['基础', '经典音效', '流派', '设备', '场景', '监听'];
 function findPreset(id) {
@@ -187,18 +190,31 @@ function bassCurve(amount) {
   }
   return c;
 }
+// 生成卷积 IR：双声道去相关噪声 + 指数衰减。normalize=false 时手动归一化，
+// 保证湿声有明确能量（旧版 normalize=true + 短 IR 导致混响几乎听不见）。
 function makeIR(def, size) {
   var rate = ctx.sampleRate;
-  var len = Math.max(1, Math.floor(rate * Math.min(4.0, def.len * (size / 2.0))));
+  var len = Math.max(1, Math.floor(rate * Math.min(6.0, def.len * (size / 2.0))));
   var buf = ctx.createBuffer(2, len, rate);
   var pre = Math.floor(rate * def.pre);
+  var energy = 0;
   for (var ch = 0; ch < 2; ch++) {
     var d = buf.getChannelData(ch);
     for (var i = 0; i < len; i++) {
       if (i < pre) { d[i] = 0; continue; }
       var t = (i - pre) / (len - pre);
-      d[i] = (Math.random() * 2 - 1) * Math.pow(1 - t, def.decay) * 0.5;
+      // 前段更密（早期反射），后段衰减；加一点点前置脉冲让尾音更实
+      var decay = Math.pow(1 - t, def.decay);
+      var v = (Math.random() * 2 - 1) * decay;
+      d[i] = v;
+      energy += v * v;
     }
+  }
+  // 归一化到总能量 1，卷积后湿声电平可控
+  var scale = energy > 0 ? 1 / Math.sqrt(energy / 2) : 1;
+  for (var c2 = 0; c2 < 2; c2++) {
+    var dd = buf.getChannelData(c2);
+    for (var k = 0; k < len; k++) dd[k] *= scale;
   }
   return buf;
 }
@@ -241,8 +257,10 @@ function buildChain() {
   N.exciteDry = ctx.createGain(); N.exciteDry.gain.value = 1;
   N.exciteWet = ctx.createGain(); N.exciteWet.gain.value = 0;
   N.air = ctx.createBiquadFilter(); N.air.type = 'highshelf'; N.air.frequency.value = 9000; N.air.gain.value = 0;
-  // 动态
+  // 动态：compPre 把信号顶进压缩阈值，comp 后 makeup 补偿（不再是抬峰值）
+  N.compPre = ctx.createGain(); N.compPre.gain.value = 1;
   N.comp = ctx.createDynamicsCompressor();
+  N.comp.knee.value = 4; N.comp.attack.value = 0.003; N.comp.release.value = 0.18;
   N.makeup = ctx.createGain();
   N.limiter = ctx.createDynamicsCompressor();
   N.limiter.threshold.value = -1; N.limiter.knee.value = 0; N.limiter.ratio.value = 20;
@@ -250,7 +268,7 @@ function buildChain() {
   // 混响
   N.revSend = ctx.createGain(); N.revSend.gain.value = 0;
   N.predelay = ctx.createDelay(1.0); N.predelay.delayTime.value = 0.02;
-  N.conv = ctx.createConvolver(); N.conv.normalize = true;
+  N.conv = ctx.createConvolver(); N.conv.normalize = false;   // IR 已手动归一化
   N.revReturn = ctx.createGain(); N.revReturn.gain.value = 1;
   N.master = ctx.createGain(); N.master.channelCount = 2; N.master.channelCountMode = 'explicit'; N.master.channelInterpretation = 'speakers';
   // M/S 矩阵
@@ -282,7 +300,7 @@ function buildChain() {
   // 激励：eq -> 干路(1-w) 与 饱和湿路(w) 互补汇入 exciteSum
   eqEnd.connect(N.exciteDry); N.exciteDry.connect(N.exciteSum);
   eqEnd.connect(N.exciteDrive); N.exciteDrive.connect(N.exciteWS); N.exciteWS.connect(N.exciteWet); N.exciteWet.connect(N.exciteSum);
-  N.exciteSum.connect(N.air); N.air.connect(N.comp); N.comp.connect(N.makeup);
+  N.exciteSum.connect(N.air); N.air.connect(N.compPre); N.compPre.connect(N.comp); N.comp.connect(N.makeup);
   // 干湿
   N.makeup.connect(N.master);
   N.makeup.connect(N.revSend); N.revSend.connect(N.predelay); N.predelay.connect(N.conv); N.conv.connect(N.revReturn); N.revReturn.connect(N.master);
@@ -368,13 +386,19 @@ function applyComp() {
   var m = state.modules.comp;
   try {
     nodes.comp.threshold.value = clamp(m.th != null ? m.th : -24, -60, 0);
-    nodes.comp.knee.value = clamp(m.knee != null ? m.knee : 8, 0, 40);
+    nodes.comp.knee.value = clamp(m.knee != null ? m.knee : 4, 0, 40);
     nodes.comp.ratio.value = clamp(m.ratio != null ? m.ratio : 4, 1, 20);
-    nodes.comp.attack.value = clamp(m.at != null ? m.at : 0.008, 0, 1);
-    nodes.comp.release.value = clamp(m.rel != null ? m.rel : 0.2, 0, 1);
-    nodes.makeup.gain.value = dbToGain(clamp(m.makeup || 0, -12, 12));
+    nodes.comp.attack.value = clamp(m.at != null ? m.at : 0.003, 0, 1);
+    nodes.comp.release.value = clamp(m.rel != null ? m.rel : 0.18, 0, 1);
+    // 压缩前预增益：把信号顶进阈值，压缩才真正发生；补偿只补回一部分，避免抬峰值
+    var mk = clamp(m.makeup || 0, -12, 12);
+    nodes.compPre.gain.value = dbToGain(clamp(mk * 0.6, -8, 8));
+    nodes.makeup.gain.value = dbToGain(clamp(mk * 0.4, -6, 6));
+    // 限幅兜住压缩后峰值
     nodes.limiter.threshold.value = m.limiter ? clamp(m.ceiling != null ? m.ceiling : -1, -12, 0) : 0;
     nodes.limiter.ratio.value = m.limiter ? 20 : 1;
+    nodes.limiter.attack.value = m.limiter ? 0.001 : 0.01;
+    nodes.limiter.release.value = m.limiter ? 0.12 : 0.25;
   } catch (e) {}
 }
 function applyReverb() {
@@ -587,6 +611,8 @@ function toggleEnabled() {
   toast(state.enabled ? '音效已开启' : '音效已关闭 · 原音', state.enabled ? 'ok' : 'off');
 }
 function bindShortcuts() {
+  // 桌面歌词窗/歌词页不绑快捷键，只在主界面生效
+  if ((location.hash || '').toLowerCase().indexOf('lyrics') >= 0) return;
   // Alt+Shift+S 开关总音效，Alt+Shift+P 开面板，Alt+Shift+M 智能
   document.addEventListener('keydown', function (e) {
     if (!e.altKey || !e.shiftKey) return;
@@ -957,8 +983,20 @@ function toggleAB() {
 }
 
 // ---------------- 装配 UI ----------------
+// 只在主界面建 UI。桌面歌词窗(hash=#lyrics) 和全屏歌词页(#/lyrics) 一律不建，
+// 避免按钮/面板漏进歌词界面；音频接管不受影响（hook 在 p3 独立运行）。
+function isMainUI() {
+  var h = (location.hash || '').toLowerCase();
+  if (h.indexOf('lyrics') >= 0) return false;      // #lyrics 与 #/lyrics 都排除
+  if (h.indexOf('/mv') >= 0 || h.indexOf('/video') >= 0) return false;
+  if (!document.body) return false;
+  // 全屏歌词页有 .lyrics-screen，桌面歌词窗有 .lyrics-content-wrapper
+  if (document.querySelector('.lyrics-screen, .lyrics-content-wrapper')) return false;
+  return true;
+}
 function ensureUI() {
   if (ui.btn && ui.btn.parentNode) return;
+  if (!isMainUI()) return;
   var btn = el('button', 'ss-toggle', '♪'); btn.id = 'ss-toggle'; btn.title = '声境音效 (Alt+Shift+P)';
   btn.addEventListener('click', function (e) { e.preventDefault(); e.stopPropagation(); togglePanel(); });
   var host = document.querySelector('.extra-controls');
@@ -1089,11 +1127,43 @@ window.__ss = {
   eqCurve: function () { drawEQCurve(); return true; }
 };
 
+// 进/出歌词界面时收起或恢复 UI（音频接管始终不断）
+function syncUIVisibility() {
+  var show = isMainUI();
+  if (!show) {
+    if (ui.btn) ui.btn.style.display = 'none';
+    if (ui.fab) ui.fab.style.display = 'none';
+    if (ui.panel) ui.panel.style.display = 'none';
+  } else {
+    if (!ui.btn || !ui.btn.parentNode) { ensureUI(); return; }
+    if (ui.btn) ui.btn.style.display = '';
+    if (ui.fab) ui.fab.style.display = '';
+    if (ui.panel) ui.panel.style.display = '';
+  }
+}
+
 // ---------------- 启动 ----------------
 bindShortcuts();
 if (document.body) ensureUI();
 else document.addEventListener('DOMContentLoaded', function () { ensureUI(); });
-var _iv = setInterval(function () { if (document.body && !ui.btn) ensureUI(); if (ui.btn) clearInterval(_iv); }, 300);
+// 主界面轮询只在没建好 UI 时跑，建好后停掉，不进歌词界面就停
+var _iv = setInterval(function () {
+  if (!document.body) return;
+  if (isMainUI() && !ui.btn) { ensureUI(); }
+  if (ui.btn) clearInterval(_iv);
+}, 400);
+// 路由变化（hash 切页）与歌词界面挂载时同步显隐
+window.addEventListener('hashchange', syncUIVisibility);
+document.addEventListener('DOMContentLoaded', syncUIVisibility);
+// 轻量监听：只在 hash 或 .lyrics-screen 出现/消失时切 UI。桌面歌词窗 hash 固定为
+// lyrics，永远非主界面，直接不启轮询，省掉那个窗口的一切开销。
+var _lastUI = null;
+if ((location.hash || '').toLowerCase().indexOf('lyrics') < 0) {
+  setInterval(function () {
+    var now = isMainUI();
+    if (now !== _lastUI) { _lastUI = now; syncUIVisibility(); }
+  }, 600);
+}
 if (console && console.log) console.log(LOG + ' SonicScape 引擎已加载');
 })();
 
