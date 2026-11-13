@@ -1,0 +1,41 @@
+{
+  "manifest_version": 3,
+  "name": "声境音效 SonicScape",
+  "plugin_id": "sonic-scape",
+  "version": "1.0.0",
+  "description": "模块化音效引擎：可拖点 10 段参数 EQ、低音谐波增强、激励/饱和、压缩/限幅、卷积混响(可导入 IR)、M/S 声场、实时频谱、智能调音、预设生态与一键快捷开关。",
+  "moekoe": true,
+  "minversion": "1.7.0",
+  "author": {
+    "name": "SHIYI",
+    "url": "https://github.com/MoeKoeMusic/MoeKoeMusic"
+  },
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "file:///*",
+        "http://*/*",
+        "https://*/*"
+      ],
+      "world": "MAIN",
+      "js": [
+        "sonic-scape.js"
+      ],
+      "css": [
+        "styles.css"
+      ],
+      "run_at": "document_start"
+    }
+  ],
+  "icons": {
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png",
+    "256": "icons/icon256.png"
+  }
+}
