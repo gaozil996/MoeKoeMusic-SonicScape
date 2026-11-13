@@ -407,19 +407,20 @@ function applyOutput() {
   if (!nodes) return;
   try { nodes.output.gain.value = dbToGain(clamp(state.modules.output.gain || 0, -24, 12)); } catch (e) {}
 }
+var enabledApplied = null;
 function applyEnabled() {
   if (!nodes || !claimed) return;
-  // 总开关：关 = 用一条从 input 直通 destination 的旁路，绕过整条 DSP 链
+  if (enabledApplied === state.enabled) return;   // 幂等，状态没变不重连
   var on = state.enabled;
   try {
-    if (on) {
-      if (nodes.bypass) { srcNode.disconnect(nodes.bypass); nodes.bypass.disconnect(); nodes.bypass = null; }
-      srcNode.connect(nodes.input);
-    } else {
-      srcNode.disconnect();
-      if (!nodes.bypass) { nodes.bypass = ctx.createGain(); nodes.bypass.gain.value = 1; nodes.bypass.connect(ctx.destination); }
+    srcNode.disconnect();
+    if (nodes.bypass) { try { nodes.bypass.disconnect(); } catch (e) {} nodes.bypass = null; }
+    if (on) srcNode.connect(nodes.input);
+    else {
+      nodes.bypass = ctx.createGain(); nodes.bypass.gain.value = 1; nodes.bypass.connect(ctx.destination);
       srcNode.connect(nodes.bypass);
     }
+    enabledApplied = on;
   } catch (e) {}
 }
 function applyAll() {
@@ -465,7 +466,7 @@ function claim(el) {
   installSetSinkHook(el);
   el.addEventListener('play', onPlay, true);
   resume(); setTimeout(resume, 300); setTimeout(resume, 1000);
-  state.enabled = true;
+  state.enabled = true; enabledApplied = true;   // 已连 input，跳过 applyEnabled 首次重连
   applyAll();
 }
 function installSetSinkHook(el) {
@@ -615,7 +616,7 @@ function sec(title, key) {
     var open = body.style.display !== 'block';
     body.style.display = open ? 'block' : 'none';
     caret.textContent = open ? '▾' : '▸';
-    if (open) toast(null); // 触发一次可见反馈（由 title 提供，见下）
+    if (open && typeof title === 'string') toast(title);
   });
   wrap.appendChild(head); wrap.appendChild(body);
   wrap._body = body;
