@@ -761,7 +761,13 @@ function buildEQPage(parent) {
   bindEQDrag();
   var bandsBox = el('div', 'ss-bands'); p.appendChild(bandsBox); ui.bandsBox = bandsBox;
   var flat = el('button', 'ss-btn', '全部归零');
-  flat.addEventListener('click', function (e) { e.preventDefault(); state.modules.eq.bands.forEach(function (b) { b.gain = 0; }); applyEQ(); renderBands(); toast('EQ 已归零'); });
+  flat.addEventListener('click', function (e) {
+    e.preventDefault();
+    // 彻底重置：增益归零，频率/Q/类型回默认，让曲线上的点也回到标准位置
+    state.modules.eq = { bands: defaultBands() };
+    applyEQ(); renderBands(); drawEQCurve(); saveState();
+    toast('EQ 已全部归零', 'ok');
+  });
   p.appendChild(flat);
 }
 function eqCanvasPos(b, i) {
