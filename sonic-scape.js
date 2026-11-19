@@ -82,18 +82,24 @@ function loadState() {
     }
   } catch (e) {}
 }
-function saveState() { try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) {} }
+var _saveT = null;
+function saveState() {
+  if (_saveT) clearTimeout(_saveT);
+  _saveT = setTimeout(function () { try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) {} }, 300);
+}
+function saveStateNow() { try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) {} }
+window.addEventListener('beforeunload', saveStateNow);
 function loadUserPresets() { try { var r = localStorage.getItem(STORE_PRESETS); if (r) return JSON.parse(r); } catch (e) {} return {}; }
 function saveUserPresets(o) { try { localStorage.setItem(STORE_PRESETS, JSON.stringify(o)); } catch (e) {} }
 
 var IR_DEFS = {
   none:   { label: '关闭', decay: 0, pre: 0, len: 0.05 },
-  room:   { label: '小房间', decay: 1.8, pre: 0.006, len: 0.45 },
-  hall:   { label: '音乐厅', decay: 2.6, pre: 0.012, len: 2.4 },
-  stage:  { label: '舞台', decay: 2.4, pre: 0.010, len: 2.0 },
-  plate:  { label: '钢板', decay: 3.0, pre: 0.004, len: 1.6 },
-  church: { label: '教堂', decay: 3.2, pre: 0.020, len: 3.2 },
-  spring: { label: '弹簧', decay: 2.0, pre: 0.003, len: 0.9 }
+  room:   { label: '小房间', decay: 1.8, pre: 0.006, len: 0.35 },
+  hall:   { label: '音乐厅', decay: 2.6, pre: 0.012, len: 0.8 },
+  stage:  { label: '舞台', decay: 2.4, pre: 0.010, len: 0.7 },
+  plate:  { label: '钢板', decay: 3.0, pre: 0.004, len: 0.5 },
+  church: { label: '教堂', decay: 3.2, pre: 0.020, len: 0.9 },
+  spring: { label: '弹簧', decay: 2.0, pre: 0.003, len: 0.3 }
 };
 
 // ---------------- 预设库（10 段语义化，名字与效果一致） ----------------
@@ -157,14 +163,14 @@ loadState();
 var USER_PRESETS = loadUserPresets();
 var CUSTOM_IR = null, CUSTOM_IR_NAME = '';
 
-
+﻿
 // ---------------- 运行时 ----------------
 var ctx = null, nodes = null, claimed = null, srcNode = null;
 var rms = 0, peak = 0, rmsBuf = null, freqBuf = null;
+var irCache = {};
 var claimedPlayed = false;
 var diag = { chain: '-', src: '-', err: '-' };
 var smartAccum = null, smartFrames = 0, smartTimer = null;
-var lastIRKey = '';
 
 function dbToGain(db) { return Math.pow(10, db / 20); }
 function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
@@ -325,7 +331,7 @@ function buildChain() {
   nodes = N;
   rmsBuf = new Float32Array(N.analyser.fftSize);
   freqBuf = new Float32Array(N.analyser.frequencyBinCount);
-  lastIRKey = 'room:2'; N.conv.buffer = makeIR(IR_DEFS.room, 2.0);
+  irCache['room:2'] = makeIR(IR_DEFS.room, 2.0); N.conv.buffer = irCache['room:2'];
   diag.chain = 'ok';
 }
 function syncVolume() {
@@ -409,13 +415,28 @@ function applyReverb() {
   try {
     nodes.revSend.gain.value = (m.ir === 'none') ? 0 : clamp(m.wet != null ? m.wet : 0.2, 0, 1);
     nodes.predelay.delayTime.value = clamp((m.predelay || 0) / 1000, 0, 0.5);
-    var key = (m.ir || 'none') + ':' + (m.size || 2).toFixed(1) + ':' + (CUSTOM_IR ? CUSTOM_IR_NAME : '');
-    if (key !== lastIRKey) {                                 // 只在 IR/尺寸变化时重建，拖湿度不爆音
-      if (m.ir === 'custom' && CUSTOM_IR) nodes.conv.buffer = CUSTOM_IR;
-      else if (m.ir !== 'none') nodes.conv.buffer = makeIR(IR_DEFS[m.ir] || IR_DEFS.room, clamp(m.size || 2, 0.5, 4));
-      lastIRKey = key;
+    // 目标 IR：按「空间+尺寸」缓存，同一个只生成一次
+    var targetIR = null;
+    if (m.ir === 'custom' && CUSTOM_IR) targetIR = CUSTOM_IR;
+    else if (m.ir !== 'none') {
+      var sz = Math.round(clamp(m.size || 2, 0.5, 4) * 2) / 2;
+      var key = (m.ir || 'room') + ':' + sz;
+      if (!irCache[key]) irCache[key] = makeIR(IR_DEFS[m.ir] || IR_DEFS.room, sz);
+      targetIR = irCache[key];
     }
+    // 换 Convolver buffer 会阻塞主线程几十毫秒，放到稍后执行，点击不卡
+    if (targetIR && nodes.conv.buffer !== targetIR) scheduleIR(targetIR);
   } catch (e) {}
+}
+var _irTimer = null, _pendingIR = null;
+function scheduleIR(buf) {
+  _pendingIR = buf;
+  if (_irTimer) return;
+  _irTimer = setTimeout(function () {
+    _irTimer = null;
+    var b = _pendingIR; _pendingIR = null;
+    if (b && nodes && nodes.conv && nodes.conv.buffer !== b) { try { nodes.conv.buffer = b; } catch (e) {} }
+  }, 90);
 }
 function applyStereo() {
   if (!nodes) return;
@@ -452,7 +473,7 @@ function applyEnabled() {
 function applyAll() {
   applyInput(); applyBass(); applyEQ(); applyExcite(); applyComp(); applyReverb(); applyStereo(); applyOutput();
   applyEnabled(); syncVolume();
-  updateUI(); renderBands(); drawEQCurve();
+  updateUI(); if (typeof syncBands === 'function') syncBands(); ui.eqDirty = true;
 }
 
 // ---------------- 预设应用 ----------------
@@ -551,7 +572,7 @@ function bandDb(spec, lo, hi) {
   for (var i = a; i <= b; i++) if (spec[i] > -120) { s += Math.pow(10, spec[i] / 10); c++; }
   return c ? 10 * Math.log10(s / c + 1e-12) : -90;
 }
-function diagTick() {
+function sampleLevels() {
   if (nodes && nodes.analyser) {
     try {
       nodes.analyser.getFloatTimeDomainData(rmsBuf);
@@ -560,7 +581,6 @@ function diagTick() {
       rms = Math.sqrt(s / rmsBuf.length); peak = p;
     } catch (e) { rms = 0; peak = 0; }
   }
-  updateDiag(); drawViz();
 }
 function dbVal() { return rms > 0 ? (20 * Math.log10(rms + 1e-9)).toFixed(1) : '-∞'; }
 
@@ -625,46 +645,45 @@ function bindShortcuts() {
   }, true);
 }
 
+// ---------------- UI 基础 ----------------
+var ui = { btn: null, panel: null, diag: null, canvas: null, cctx: null, eqCanvas: null, eqc: null,
+  raf: null, tab: 'eq', knobs: null, bandCtl: [], built: false, eqDirty: true, vizOn: false };
 
-// ---------------- UI ----------------
-var ui = { btn: null, panel: null, fab: null, diag: null, canvas: null, cctx: null, eqCanvas: null, eqc: null, timer: null, tab: 'presets' };
 function el(tag, cls, txt) { var e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; }
 function num(v, d) { return (+v).toFixed(d == null ? 2 : d); }
 
-function sec(title, key) {
-  var wrap = el('div', 'ss-sec');
-  var head = el('div', 'ss-sec-head');
-  head.appendChild(el('span', 'ss-sec-t', title));
-  var caret = el('span', 'ss-caret', '▸');
-  head.appendChild(caret);
-  var body = el('div', 'ss-sec-body');
-  body.style.display = 'none';                 // 初始 inline 状态定死，单击即展开
-  head.addEventListener('click', function (e) {
-    e.preventDefault();
-    var open = body.style.display !== 'block';
-    body.style.display = open ? 'block' : 'none';
-    caret.textContent = open ? '▾' : '▸';
-    if (open && typeof title === 'string') toast(title);
-  });
-  wrap.appendChild(head); wrap.appendChild(body);
-  wrap._body = body;
-  if (typeof title === 'string') head.setAttribute('data-t', title);
-  return wrap;
+// 小标题分组
+function group(title) {
+  var g = el('div', 'ss-group');
+  if (title) g.appendChild(el('div', 'ss-group-h', title));
+  return g;
 }
+// 一行：标签 + 控件 + 数值
 function row(label, ctrl, valEl) {
   var r = el('div', 'ss-row2');
-  r.appendChild(el('label', 'ss-lab', label));
+  if (label) r.appendChild(el('label', 'ss-lab', label));
   r.appendChild(ctrl);
   if (valEl) r.appendChild(valEl);
   return r;
 }
-function slider(min, max, step, val, onInput) {
+// 滑块（返回 {s,v,set,fmt}）
+function slider(min, max, step, val, onInput, fmt) {
   var s = el('input', 'ss-rng'); s.type = 'range'; s.min = min; s.max = max; s.step = step; s.value = val;
   var v = el('span', 'ss-val', '');
-  s.addEventListener('input', function () { onInput(parseFloat(s.value), v); s.classList.add('ss-flash'); setTimeout(function () { s.classList.remove('ss-flash'); }, 220); });
-  return { wrap: row('', s, v), s: s, v: v };
+  var f = fmt || function (x) { return num(x); };
+  v.textContent = f(val);
+  s.addEventListener('input', function () {
+    var x = parseFloat(s.value); v.textContent = f(x); onInput(x);
+    s.classList.add('ss-flash'); setTimeout(function () { s.classList.remove('ss-flash'); }, 160);
+  });
+  // 双击复位到默认值
+  s.addEventListener('dblclick', function () {
+    var d = parseFloat(s.getAttribute('data-def'));
+    if (isFinite(d)) { s.value = d; v.textContent = f(d); onInput(d); toast('已复位'); }
+  });
+  s.setAttribute('data-def', val);
+  return { s: s, v: v, wrap: row('', s, v), set: function (x) { s.value = x; v.textContent = f(x); }, fmt: f };
 }
-function setSlider(sl, val, fmt) { sl.s.value = val; sl.v.textContent = fmt != null ? fmt : num(val); }
 function select(options, val, onChange) {
   var s = el('select', 'ss-sel');
   for (var i = 0; i < options.length; i++) { var o = el('option', null, options[i].label); o.value = options[i].value; s.appendChild(o); }
@@ -672,67 +691,93 @@ function select(options, val, onChange) {
   s.addEventListener('change', function () { onChange(s.value); });
   return s;
 }
+function check(label, checked, onChange) {
+  var w = el('label', 'ss-check');
+  var c = el('input'); c.type = 'checkbox'; c.checked = !!checked;
+  c.addEventListener('change', function () { onChange(c.checked); });
+  w.appendChild(c); w.appendChild(document.createTextNode(' ' + label));
+  return { wrap: w, set: function (x) { c.checked = !!x; } };
+}
 
+// ---------------- 面板骨架 ----------------
 function buildPanel() {
-  var panel = el('div', 'ss-panel ss-full' + (state.open ? '' : ' ss-hidden'));
+  var panel = el('div', 'ss-panel' + (state.open ? '' : ' ss-hidden'));
   panel.id = 'ss-panel';
-  var head = el('div', 'ss-head');
-  var t = el('div', 'ss-title', '声境音效');
-  t.appendChild(el('small', null, 'SonicScape · 模块化音效引擎'));
-  head.appendChild(t);
-  var hb = el('div', 'ss-head-btns');
-  var pw = el('button', 'ss-mini ss-power', state.enabled ? '● 开' : '○ 关');
+
+  // 顶栏
+  var top = el('div', 'ss-top');
+  var brand = el('div', 'ss-brand', '声境音效');
+  brand.appendChild(el('span', 'ss-brand-sub', 'SonicScape'));
+  top.appendChild(brand);
+  ui.status = el('div', 'ss-status', '');
+  top.appendChild(ui.status);
+  var acts = el('div', 'ss-acts');
+  var pw = el('button', 'ss-btn ss-power', '');
   pw.title = '总开关 (Alt+Shift+S)';
   pw.addEventListener('click', function (e) { e.preventDefault(); toggleEnabled(); });
   ui.pw = pw;
-  var smartBtn = el('button', 'ss-mini ss-smart', '智能'); smartBtn.addEventListener('click', function (e) { e.preventDefault(); toggleSmart(!state.smart); });
-  var abBtn = el('button', 'ss-mini', 'A/B'); abBtn.addEventListener('click', function (e) { e.preventDefault(); toggleAB(); });
-  var close = el('button', 'ss-close', '×'); close.title = '关闭 (Esc)'; close.addEventListener('click', function (e) { e.preventDefault(); togglePanel(); });
-  hb.appendChild(pw); hb.appendChild(abBtn); hb.appendChild(smartBtn); hb.appendChild(close);
-  head.appendChild(hb); panel.appendChild(head);
+  var ab = el('button', 'ss-btn', 'A/B'); ab.title = '原音对照';
+  ab.addEventListener('click', function (e) { e.preventDefault(); toggleAB(); });
+  var smart = el('button', 'ss-btn ss-smart', '智能');
+  smart.addEventListener('click', function (e) { e.preventDefault(); toggleSmart(!state.smart); });
+  var close = el('button', 'ss-btn ss-close', '×'); close.title = '关闭 (Esc)';
+  close.addEventListener('click', function (e) { e.preventDefault(); togglePanel(); });
+  acts.appendChild(pw); acts.appendChild(ab); acts.appendChild(smart); acts.appendChild(close);
+  top.appendChild(acts);
+  panel.appendChild(top);
 
-  ui.status = el('div', 'ss-status', ''); panel.appendChild(ui.status);
-
-  // 两栏主体：左预设库，右调音区
+  // 主体两栏
   var body = el('div', 'ss-body');
-  var side = el('div', 'ss-side'); ui.side = side; buildPresetSide(side);
+  var side = el('div', 'ss-side'); ui.side = side;
   var main = el('div', 'ss-main'); ui.main = main;
 
-  // 四个人话旋钮
-  ui.simple = el('div', 'ss-simple'); main.appendChild(ui.simple); buildSimpleView(ui.simple);
+  // 右栏：旋钮 + 强度
+  var hero = el('div', 'ss-hero');
+  ui.hero = hero; main.appendChild(hero);
 
-  // 频谱 + 电平
-  var vizWrap = el('div', 'ss-viz');
-  ui.canvas = el('canvas', 'ss-spectrum'); ui.canvas.width = 900; ui.canvas.height = 90;
-  vizWrap.appendChild(ui.canvas); ui.cctx = ui.canvas.getContext('2d');
-  var meter = el('div', 'ss-meter2'); var bar = el('div', 'ss-meter2-bar'); meter.appendChild(bar);
-  vizWrap.appendChild(meter); ui.meterBar = bar; main.appendChild(vizWrap);
+  // 频谱
+  var viz = el('div', 'ss-viz');
+  ui.canvas = el('canvas', 'ss-spectrum'); ui.canvas.width = 1040; ui.canvas.height = 96;
+  viz.appendChild(ui.canvas); ui.cctx = ui.canvas.getContext('2d');
+  var meter = el('div', 'ss-meter'); var bar = el('div', 'ss-meter-bar'); meter.appendChild(bar);
+  viz.appendChild(meter); ui.meterBar = bar;
+  main.appendChild(viz);
 
-  // 高级参数：标签页全放这一屏，不折叠也不用切模式
-  ui.advanced = el('div', 'ss-advanced'); main.appendChild(ui.advanced);
+  // 高级标签
+  var adv = el('div', 'ss-advanced'); ui.advanced = adv; main.appendChild(adv);
   var tabs = el('div', 'ss-tabs');
-  [['eq', '均衡'], ['dyn', '动态·激励'], ['space', '混响'], ['stereo', '声场'], ['io', '输入·输出'], ['lib', '生态']].forEach(function (pair) {
-    var b = el('button', 'ss-tab', pair[1]); b.setAttribute('data-tab', pair[0]);
-    b.addEventListener('click', function (e) { e.preventDefault(); switchTab(pair[0]); });
+  [['eq', '均衡'], ['dyn', '动态'], ['space', '混响'], ['stereo', '声场'], ['io', '输入输出'], ['lib', '预设库']].forEach(function (t) {
+    var b = el('button', 'ss-tab', t[1]); b.setAttribute('data-tab', t[0]);
+    b.addEventListener('click', function (e) { e.preventDefault(); switchTab(t[0]); });
     tabs.appendChild(b);
   });
-  ui.advanced.appendChild(tabs);
-  var pages = el('div', 'ss-pages'); ui.advanced.appendChild(pages); ui.pages = pages;
-  buildEQPage(pages); buildDynPage(pages); buildSpacePage(pages);
-  buildStereoPage(pages); buildIOPage(pages); buildLibPage(pages);
+  adv.appendChild(tabs);
+  var pages = el('div', 'ss-pages'); ui.pages = pages; adv.appendChild(pages);
 
-  body.appendChild(side); body.appendChild(main); panel.appendChild(body);
-  ui.diag = el('div', 'ss-diag', ''); panel.appendChild(ui.diag);
+  body.appendChild(side); body.appendChild(main);
+  panel.appendChild(body);
+  ui.diag = el('div', 'ss-foot', ''); panel.appendChild(ui.diag);
   return panel;
 }
 
-// 左栏预设：全部分类平铺，不横向滚动
+function switchTab(k) {
+  ui.tab = k; state.tab = k; saveState();
+  var tabs = ui.panel.querySelectorAll('.ss-tab');
+  for (var i = 0; i < tabs.length; i++) tabs[i].classList.toggle('ss-on', tabs[i].getAttribute('data-tab') === k);
+  var pg = ui.panel.querySelectorAll('.ss-page');
+  for (var j = 0; j < pg.length; j++) pg[j].style.display = (pg[j].getAttribute('data-page') === k) ? 'block' : 'none';
+  if (k === 'eq') { ui.eqDirty = true; drawEQCurve(); }
+}
+function page(parent, key) { var p = el('div', 'ss-page'); p.setAttribute('data-page', key); p.style.display = 'none'; parent.appendChild(p); return p; }
+
+
+// ---------------- 左栏：预设库 ----------------
 function buildPresetSide(side) {
   side.innerHTML = '';
   GROUPS.forEach(function (g) {
     var items = PRESETS.filter(function (x) { return x.group === g; });
     if (!items.length) return;
-    side.appendChild(el('div', 'ss-group-label', g));
+    side.appendChild(el('div', 'ss-group-h', g));
     var grid = el('div', 'ss-sgrid');
     items.forEach(function (it) {
       var b = el('button', 'ss-item', it.name); b.setAttribute('data-id', it.id);
@@ -741,319 +786,59 @@ function buildPresetSide(side) {
     });
     side.appendChild(grid);
   });
-  side.appendChild(el('div', 'ss-group-label', '我的预设'));
+  side.appendChild(el('div', 'ss-group-h', '我的预设'));
   var ug = el('div', 'ss-sgrid'); ug.id = 'ss-user-grid'; side.appendChild(ug);
-  var saveRow = el('div', 'ss-row2');
+  var sr = el('div', 'ss-row2 ss-save');
   var nameInp = el('input', 'ss-txt'); nameInp.placeholder = '预设名'; nameInp.id = 'ss-preset-name';
-  var saveBtn = el('button', 'ss-btn', '保存');
+  var saveBtn = el('button', 'ss-btn ss-btn-sm', '保存当前');
   saveBtn.addEventListener('click', function (e) { e.preventDefault(); saveUserPreset(nameInp.value); });
-  saveRow.appendChild(nameInp); saveRow.appendChild(saveBtn); side.appendChild(saveRow);
+  sr.appendChild(nameInp); sr.appendChild(saveBtn); side.appendChild(sr);
   renderUserPresets();
 }
-function switchTab(k) {
-  ui.tab = k; state.tab = k; saveState();
-  var tabs = ui.panel.querySelectorAll('.ss-tab');
-  for (var i = 0; i < tabs.length; i++) tabs[i].classList.toggle('ss-active', tabs[i].getAttribute('data-tab') === k);
-  var pg = ui.panel.querySelectorAll('.ss-page');
-  for (var j = 0; j < pg.length; j++) pg[j].style.display = (pg[j].getAttribute('data-page') === k) ? 'block' : 'none';
-  if (k === 'eq') { drawEQCurve(); }
-}
-function page(parent, key) { var p = el('div', 'ss-page'); p.setAttribute('data-page', key); p.style.display = 'none'; parent.appendChild(p); return p; }
 
-
-// ---------------- 预设页 ----------------
-function buildPresetsPage(parent) {
-  var p = page(parent, 'presets');
-  var inten = sec('全局音效强度', 'intensity');
-  var sl = slider(0, 100, 1, state.intensity, function (v, ve) {
-    state.intensity = v; ve.textContent = v + '%'; saveState(); applyEQ(); applyExcite(); drawEQCurve();
-    toast('强度 ' + v + '%');
-  });
-  setSlider(sl, state.intensity, state.intensity + '%');
-  inten._body.appendChild(sl.wrap);
-  inten._body.appendChild(el('p', 'ss-hint', '整体缩放 EQ 提升量与激励，0% 归零方便 A/B 对比。'));
-  p.appendChild(inten);
-  GROUPS.forEach(function (g) {
-    var items = PRESETS.filter(function (x) { return x.group === g; });
-    if (!items.length) return;
-    var s = sec(g, g);
-    var grid = el('div', 'ss-grid');
-    items.forEach(function (it) {
-      var b = el('button', 'ss-item', it.name); b.setAttribute('data-id', it.id);
-      b.addEventListener('click', function (e) { e.preventDefault(); applyPreset(it.id); });
-      grid.appendChild(b);
-    });
-    s._body.appendChild(grid); p.appendChild(s);
-  });
-  var us = sec('我的预设', 'user');
-  var ug = el('div', 'ss-grid'); ug.id = 'ss-user-grid'; us._body.appendChild(ug);
-  var saveRow = el('div', 'ss-row2');
-  var nameInp = el('input', 'ss-txt'); nameInp.placeholder = '预设名'; nameInp.id = 'ss-preset-name';
-  var saveBtn = el('button', 'ss-btn', '保存当前');
-  saveBtn.addEventListener('click', function (e) { e.preventDefault(); saveUserPreset(nameInp.value); toast('已保存预设'); });
-  saveRow.appendChild(nameInp); saveRow.appendChild(saveBtn); us._body.appendChild(saveRow);
-  p.appendChild(us);
-}
-function saveUserPreset(name) {
-  name = (name || '').trim() || ('预设' + (Object.keys(USER_PRESETS).length + 1));
-  USER_PRESETS[name] = { modules: deepClone(state.modules), intensity: state.intensity, ts: Date.now() };
-  saveUserPresets(USER_PRESETS); renderUserPresets();
-}
-function delUserPreset(name) { delete USER_PRESETS[name]; saveUserPresets(USER_PRESETS); renderUserPresets(); toast('已删除 ' + name); }
-function applyUserPreset(name) {
-  var o = USER_PRESETS[name]; if (!o) return;
-  state.modules = deepClone(o.modules); state.intensity = o.intensity != null ? o.intensity : 100;
-  if (!state.modules.eq || !Array.isArray(state.modules.eq.bands) || state.modules.eq.bands.length !== 10) state.modules.eq = { bands: defaultBands() };
-  state.preset = 'user:' + name; state.smart = false; state.ab = null; saveState(); applyAll(); toast('已应用：' + name);
-}
-function renderUserPresets() {
-  var g = ui.panel && ui.panel.querySelector('#ss-user-grid'); if (!g) return;
-  g.innerHTML = '';
-  Object.keys(USER_PRESETS).forEach(function (name) {
-    var r = el('div', 'ss-user-row');
-    var b = el('button', 'ss-item', name); b.addEventListener('click', function (e) { e.preventDefault(); applyUserPreset(name); });
-    var d = el('button', 'ss-del', '×'); d.addEventListener('click', function (e) { e.preventDefault(); delUserPreset(name); });
-    r.appendChild(b); r.appendChild(d); g.appendChild(r);
-  });
-}
-
-// ---------------- EQ 页：可拖点曲线编辑器 ----------------
-function buildEQPage(parent) {
-  var p = page(parent, 'eq');
-  p.appendChild(el('p', 'ss-hint', '直接拖动曲线上的圆点调频率(左右)与增益(上下)。下方逐段精调类型/频率/增益/Q。'));
-  ui.eqCanvas = el('canvas', 'ss-eqcurve'); ui.eqCanvas.width = 320; ui.eqCanvas.height = 150;
-  p.appendChild(ui.eqCanvas); ui.eqc = ui.eqCanvas.getContext('2d');
-  bindEQDrag();
-  var bandsBox = el('div', 'ss-bands'); p.appendChild(bandsBox); ui.bandsBox = bandsBox;
-  var flat = el('button', 'ss-btn', '全部归零');
-  flat.addEventListener('click', function (e) {
-    e.preventDefault();
-    // 彻底重置：增益归零，频率/Q/类型回默认，让曲线上的点也回到标准位置
-    state.modules.eq = { bands: defaultBands() };
-    applyEQ(); renderBands(); drawEQCurve(); saveState();
-    toast('EQ 已全部归零', 'ok');
-  });
-  p.appendChild(flat);
-}
-function eqCanvasPos(b, i) {
-  var W = ui.eqCanvas.width, H = ui.eqCanvas.height;
-  var f = clamp(b.freq || EQ_FREQS[i], 20, 20000);
-  var x = Math.log(f / 20) / Math.log(1000) * W;
-  var y = H / 2 - clamp((b.gain || 0), -15, 15) / 15 * (H / 2 - 10);
-  return { x: x, y: y };
-}
-function bindEQDrag() {
-  var drag = -1;
-  function pt(e) { var r = ui.eqCanvas.getBoundingClientRect(); return { x: (e.clientX - r.left) * ui.eqCanvas.width / r.width, y: (e.clientY - r.top) * ui.eqCanvas.height / r.height }; }
-  ui.eqCanvas.addEventListener('pointerdown', function (e) {
-    var q = pt(e), best = -1, bd = 22;
-    state.modules.eq.bands.forEach(function (b, i) { var c = eqCanvasPos(b, i), d = Math.hypot(c.x - q.x, c.y - q.y); if (d < bd) { bd = d; best = i; } });
-    if (best >= 0) { drag = best; ui.eqCanvas.setPointerCapture(e.pointerId); }
-  });
-  ui.eqCanvas.addEventListener('pointermove', function (e) {
-    if (drag < 0) return;
-    var q = pt(e), W = ui.eqCanvas.width, H = ui.eqCanvas.height;
-    var b = state.modules.eq.bands[drag];
-    b.freq = Math.round(clamp(20 * Math.pow(1000, q.x / W), 20, 20000));
-    b.gain = +clamp((H / 2 - q.y) / (H / 2 - 10) * 15, -15, 15).toFixed(1);
-    applyEQ(); drawEQCurve(); renderBands();
-  });
-  ui.eqCanvas.addEventListener('pointerup', function () { if (drag >= 0) { drag = -1; toast('频段 ' + (drag + 1) + ' 已更新'); } });
-}
-function renderBands() {
-  if (!ui.bandsBox) return;
-  if (!state.modules.eq || !Array.isArray(state.modules.eq.bands) || state.modules.eq.bands.length !== 10) state.modules.eq = { bands: defaultBands() };
-  ui.bandsBox.innerHTML = '';
-  state.modules.eq.bands.forEach(function (b, i) {
-    var s = sec((EQ_FREQS[i] >= 1000 ? (EQ_FREQS[i] / 1000) + 'k' : EQ_FREQS[i]) + 'Hz · ' + num(b.gain, 1) + 'dB', 'eq' + i);
-    var typeSel = select([
-      { value: 'peaking', label: '峰值' }, { value: 'lowshelf', label: '低架' }, { value: 'highshelf', label: '高架' },
-      { value: 'lowpass', label: '低通' }, { value: 'highpass', label: '高通' }
-    ], b.type, function (v) { b.type = v; applyEQ(); drawEQCurve(); toast('频段类型已改'); });
-    s._body.appendChild(row('类型', typeSel));
-    var fSl = slider(20, 20000, 1, b.freq, function (v, ve) { b.freq = v; ve.textContent = (v >= 1000 ? (v / 1000).toFixed(1) + 'k' : v) + 'Hz'; applyEQ(); drawEQCurve(); });
-    setSlider(fSl, b.freq, (b.freq >= 1000 ? (b.freq / 1000).toFixed(1) + 'k' : b.freq) + 'Hz');
-    s._body.appendChild(row('频率', fSl.wrap.querySelector('input'), fSl.v));
-    var gSl = slider(-15, 15, 0.5, b.gain, function (v, ve) { b.gain = v; ve.textContent = num(v, 1) + 'dB'; applyEQ(); drawEQCurve(); });
-    setSlider(gSl, b.gain, num(b.gain, 1) + 'dB');
-    s._body.appendChild(row('增益', gSl.wrap.querySelector('input'), gSl.v));
-    var qSl = slider(0.1, 10, 0.1, b.q, function (v, ve) { b.q = v; ve.textContent = num(v, 1); applyEQ(); drawEQCurve(); });
-    setSlider(qSl, b.q, num(b.q, 1));
-    s._body.appendChild(row('Q', qSl.wrap.querySelector('input'), qSl.v));
-    ui.bandsBox.appendChild(s);
-  });
-}
-
-// ---------------- 动态/激励页 ----------------
-function buildDynPage(parent) {
-  var p = page(parent, 'dyn');
-  var ex = sec('激励 / 饱和', 'ex'), m = state.modules.excite;
-  var tSel = select([{ value: 'off', label: '关闭' }, { value: 'tube', label: '电子管' }, { value: 'tape', label: '磁带' }, { value: 'soft', label: '柔和饱和' }],
-    m.type, function (v) { m.type = v; applyExcite(); toast('激励：' + v); });
-  ex._body.appendChild(row('类型', tSel));
-  [['驱动', 'drive', 0, 1, 0.05], ['空气感dB', 'air', 0, 12, 0.5]].forEach(function (cfg) {
-    var sl = slider(cfg[2], cfg[3], cfg[4], m[cfg[1]], function (v, ve) { m[cfg[1]] = v; ve.textContent = num(v, 1); applyExcite(); });
-    setSlider(sl, m[cfg[1]], num(m[cfg[1]], 1)); ex._body.appendChild(row(cfg[0], sl.wrap.querySelector('input'), sl.v));
-  });
-  p.appendChild(ex);
-  var cp = sec('压缩器', 'cp'), c = state.modules.comp;
-  [['阈值dB', 'th', -60, 0, 1], ['拐点', 'knee', 0, 40, 1], ['比率', 'ratio', 1, 20, 0.5],
-   ['启动s', 'at', 0, 1, 0.005], ['释放s', 'rel', 0, 1, 0.01], ['补偿dB', 'makeup', -12, 12, 0.5],
-   ['限幅顶dB', 'ceiling', -12, 0, 0.5]].forEach(function (cfg) {
-    var sl = slider(cfg[2], cfg[3], cfg[4], c[cfg[1]], function (v, ve) { c[cfg[1]] = v; ve.textContent = num(v, 2); applyComp(); });
-    setSlider(sl, c[cfg[1]], num(c[cfg[1]], 2)); cp._body.appendChild(row(cfg[0], sl.wrap.querySelector('input'), sl.v));
-  });
-  var lim = el('label', 'ss-check'); var limCb = el('input'); limCb.type = 'checkbox'; limCb.checked = c.limiter;
-  limCb.addEventListener('change', function () { c.limiter = limCb.checked; applyComp(); toast(limCb.checked ? '限幅开' : '限幅关'); });
-  lim.appendChild(limCb); lim.appendChild(document.createTextNode(' 真峰限幅')); cp._body.appendChild(lim);
-  p.appendChild(cp);
-}
-
-// ---------------- 混响页 ----------------
-function buildSpacePage(parent) {
-  var p = page(parent, 'space'), s = sec('卷积混响', 'rev'), m = state.modules.reverb;
-  var opts = Object.keys(IR_DEFS).map(function (k) { return { value: k, label: IR_DEFS[k].label }; });
-  opts.push({ value: 'custom', label: '自定义 IR…' });
-  var irSel = select(opts, m.ir, function (v) { m.ir = v; if (v === 'custom' && !CUSTOM_IR) openIRPicker(); applyReverb(); toast('混响空间：' + (IR_DEFS[v] ? IR_DEFS[v].label : '自定义')); });
-  s._body.appendChild(row('空间', irSel));
-  [['湿度', 'wet', 0, 1, 0.01], ['预延时ms', 'predelay', 0, 200, 1], ['尺寸', 'size', 0.5, 4, 0.1]].forEach(function (cfg) {
-    var sl = slider(cfg[2], cfg[3], cfg[4], m[cfg[1]], function (v, ve) { m[cfg[1]] = v; ve.textContent = num(v, 2); applyReverb(); });
-    setSlider(sl, m[cfg[1]], num(m[cfg[1]], 2)); s._body.appendChild(row(cfg[0], sl.wrap.querySelector('input'), sl.v));
-  });
-  var imp = el('button', 'ss-btn', '导入自定义 IR (.wav)');
-  imp.addEventListener('click', function (e) { e.preventDefault(); openIRPicker(); });
-  s._body.appendChild(imp);
-  s._body.appendChild(el('p', 'ss-hint', CUSTOM_IR ? ('已载入：' + CUSTOM_IR_NAME) : '可选单/双声道 wav 作脉冲响应。'));
-  p.appendChild(s);
-}
-function openIRPicker() {
-  var inp = el('input'); inp.type = 'file'; inp.accept = '.wav,audio/wav'; inp.style.display = 'none'; document.body.appendChild(inp);
-  inp.addEventListener('change', function () {
-    var f = inp.files && inp.files[0]; if (!f) return;
-    var fr = new FileReader();
-    fr.onload = function () {
-      ctx.decodeAudioData(fr.result.slice(0), function (buf) {
-        CUSTOM_IR = buf; CUSTOM_IR_NAME = f.name; state.modules.reverb.ir = 'custom'; lastIRKey = ''; applyReverb();
-        toast('已载入 IR：' + f.name, 'ok'); saveState();
-      }, function () { toast('IR 解码失败，用 wav', 'off'); });
-    };
-    fr.readAsArrayBuffer(f); inp.remove();
-  });
-  inp.click();
-}
-
-// ---------------- 声场页 ----------------
-function buildStereoPage(parent) {
-  var p = page(parent, 'stereo'), s = sec('立体声场 / 中侧(M/S)', 'st'), m = state.modules.stereo;
-  [['宽度', 'width', -1, 1, 0.05], ['中央M dB', 'mid', -12, 12, 0.5], ['侧向S dB', 'side', -12, 12, 0.5], ['侧向低频切除Hz', 'sideLowcut', 0, 1000, 10]].forEach(function (cfg) {
-    var sl = slider(cfg[2], cfg[3], cfg[4], m[cfg[1]], function (v, ve) { m[cfg[1]] = v; ve.textContent = num(v, 2); applyStereo(); });
-    setSlider(sl, m[cfg[1]], num(m[cfg[1]], 2)); s._body.appendChild(row(cfg[0], sl.wrap.querySelector('input'), sl.v));
-  });
-  p.appendChild(s);
-  var b = sec('低音谐波增强', 'bass'), bm = state.modules.bass;
-  var on = el('label', 'ss-check'); var cb = el('input'); cb.type = 'checkbox'; cb.checked = bm.on;
-  cb.addEventListener('change', function () { bm.on = cb.checked; applyBass(); toast(cb.checked ? '低音增强开' : '低音增强关'); });
-  on.appendChild(cb); on.appendChild(document.createTextNode(' 开启')); b._body.appendChild(on);
-  [['中心频率Hz', 'freq', 30, 250, 5], ['谐波量', 'amount', 0, 1, 0.05]].forEach(function (cfg) {
-    var sl = slider(cfg[2], cfg[3], cfg[4], bm[cfg[1]], function (v, ve) { bm[cfg[1]] = v; ve.textContent = num(v, 2); applyBass(); });
-    setSlider(sl, bm[cfg[1]], num(bm[cfg[1]], 2)); b._body.appendChild(row(cfg[0], sl.wrap.querySelector('input'), sl.v));
-  });
-  p.appendChild(b);
-}
-
-// ---------------- 输入/输出页 ----------------
-function buildIOPage(parent) {
-  var p = page(parent, 'io'), i = sec('输入 / 自动响度', 'in'), m = state.modules.input;
-  var au = el('label', 'ss-check'); var cb = el('input'); cb.type = 'checkbox'; cb.checked = m.autoLoud;
-  cb.addEventListener('change', function () { m.autoLoud = cb.checked; if (!cb.checked) m.autoGainDb = 0; applyInput(); });
-  au.appendChild(cb); au.appendChild(document.createTextNode(' 响度自动匹配')); i._body.appendChild(au);
-  var sl = slider(-24, 24, 0.5, m.gain, function (v, ve) { m.gain = v; ve.textContent = num(v, 1) + 'dB'; applyInput(); });
-  setSlider(sl, m.gain, num(m.gain, 1) + 'dB'); i._body.appendChild(row('输入增益', sl.wrap.querySelector('input'), sl.v));
-  p.appendChild(i);
-  var o = sec('输出', 'out'), om = state.modules.output;
-  var sl2 = slider(-24, 12, 0.5, om.gain, function (v, ve) { om.gain = v; ve.textContent = num(v, 1) + 'dB'; applyOutput(); });
-  setSlider(sl2, om.gain, num(om.gain, 1) + 'dB'); o._body.appendChild(row('输出增益', sl2.wrap.querySelector('input'), sl2.v));
-  p.appendChild(o);
-}
-
-// ---------------- 生态页 ----------------
-function buildLibPage(parent) {
-  var p = page(parent, 'lib');
-  p.appendChild(el('p', 'ss-hint', '预设导出为 JSON 分享、导入他人预设、自定义 IR 扩展空间。'));
-  var exp = el('button', 'ss-btn', '导出当前为 JSON'); exp.addEventListener('click', function (e) { e.preventDefault(); exportPreset(); });
-  var imp = el('button', 'ss-btn', '导入 JSON 预设'); imp.addEventListener('click', function (e) { e.preventDefault(); importPreset(); });
-  var r1 = el('div', 'ss-row2'); r1.appendChild(exp); r1.appendChild(imp); p.appendChild(r1);
-  var pkg = el('button', 'ss-btn ss-btn-wide', '复制当前配置'); pkg.addEventListener('click', function (e) { e.preventDefault(); copyConfig(); });
-  p.appendChild(pkg);
-  ui.codeBox = el('textarea', 'ss-code'); ui.codeBox.placeholder = '导入/导出内容'; p.appendChild(ui.codeBox);
-  ui.stat = el('div', 'ss-stat', ''); p.appendChild(ui.stat);
-}
-function currentConfig() { return { v: 1, name: state.preset, intensity: state.intensity, modules: state.modules }; }
-function exportPreset() {
-  var txt = JSON.stringify(currentConfig()); if (ui.codeBox) ui.codeBox.value = txt;
-  try { navigator.clipboard.writeText(txt); } catch (e) {}
-  if (ui.stat) ui.stat.textContent = '已导出 ' + txt.length + ' 字节'; toast('已导出', 'ok');
-}
-function importPreset() {
-  var txt = ui.codeBox ? ui.codeBox.value.trim() : '';
-  if (!txt) { if (ui.stat) ui.stat.textContent = '先粘贴 JSON'; toast('先粘贴 JSON', 'off'); return; }
-  try {
-    var o = JSON.parse(txt); if (!o.modules) throw new Error('缺 modules');
-    state.modules = deepClone(o.modules); state.intensity = o.intensity != null ? o.intensity : 100;
-    if (!state.modules.eq || !Array.isArray(state.modules.eq.bands) || state.modules.eq.bands.length !== 10) state.modules.eq = { bands: defaultBands() };
-    state.preset = 'imported'; state.smart = false; state.ab = null; saveState(); applyAll();
-    if (ui.stat) ui.stat.textContent = '导入成功'; toast('导入成功', 'ok');
-  } catch (e) { if (ui.stat) ui.stat.textContent = '导入失败：' + e.message; toast('导入失败', 'off'); }
-}
-function copyConfig() {
-  var txt = JSON.stringify(currentConfig()); if (ui.codeBox) ui.codeBox.value = txt;
-  try { navigator.clipboard.writeText(txt); } catch (e) {}
-  if (ui.stat) ui.stat.textContent = '已复制'; toast('已复制', 'ok');
-}
-
-// ---------------- 右栏调音区：四个人话旋钮 + 强度 ----------------
-// 旋钮只驱动独立模块（低音/激励/声场/混响），不碰 EQ，避免和高级参数互相打架。
-// 预设统一放左栏，这里不再重复。
-function buildSimpleView(parent) {
-  parent.innerHTML = '';
+// ---------------- 右栏：旋钮 + 强度 ----------------
+function buildHero(hero) {
+  hero.innerHTML = '';
   var knobs = el('div', 'ss-knobs');
-  [['bass', '低音'], ['air', '亮度'], ['space', '声场'], ['reverb', '混响']].forEach(function (pair) {
-    var k = pair[0], label = pair[1];
-    var wrap = el('div', 'ss-knob');
-    wrap.appendChild(el('div', 'ss-knob-v', ''));
+  [['bass', '低音'], ['air', '亮度'], ['space', '声场'], ['reverb', '混响']].forEach(function (p) {
+    var k = p[0], label = p[1];
+    var box = el('div', 'ss-knob');
+    var val = el('div', 'ss-knob-v', '0');
+    box.appendChild(val);
     var rng = el('input', 'ss-knob-r'); rng.type = 'range'; rng.min = 0; rng.max = 100; rng.step = 1;
     rng.setAttribute('data-knob', k);
-    rng.value = (k === 'space') ? 50 : 0;
+    rng.setAttribute('data-def', k === 'space' ? 50 : 0);
+    rng.value = k === 'space' ? 50 : 0;
     rng.addEventListener('input', function () {
-      setKnob(k, parseFloat(rng.value));
-      wrap.querySelector('.ss-knob-v').textContent = rng.value;
-      rng.classList.add('ss-flash'); setTimeout(function () { rng.classList.remove('ss-flash'); }, 200);
+      setKnob(k, parseFloat(rng.value)); val.textContent = rng.value;
     });
-    wrap.appendChild(rng);
-    wrap.appendChild(el('div', 'ss-knob-l', label));
-    knobs.appendChild(wrap);
+    rng.addEventListener('dblclick', function () {
+      var d = parseInt(rng.getAttribute('data-def'), 10);
+      rng.value = d; setKnob(k, d); val.textContent = d; toast(label + ' 已复位');
+    });
+    box.appendChild(rng);
+    box.appendChild(el('div', 'ss-knob-l', label));
+    knobs.appendChild(box);
   });
+  hero.appendChild(knobs);
   ui.knobs = knobs;
-  parent.appendChild(knobs);
 
-  var row2 = el('div', 'ss-row2 ss-simple-strength');
-  row2.appendChild(el('label', 'ss-lab', '强度'));
-  var srng = el('input', 'ss-rng'); srng.type = 'range'; srng.min = 0; srng.max = 100; srng.step = 1; srng.value = state.intensity;
-  var sval = el('span', 'ss-val', state.intensity + '%');
-  srng.addEventListener('input', function () {
-    state.intensity = parseFloat(srng.value); sval.textContent = srng.value + '%';
-    saveState(); applyEQ(); applyExcite(); drawEQCurve();
+  var sr = el('div', 'ss-row2 ss-strength');
+  sr.appendChild(el('label', 'ss-lab', '强度'));
+  var s = el('input', 'ss-rng'); s.type = 'range'; s.min = 0; s.max = 100; s.step = 1; s.value = state.intensity;
+  var sv = el('span', 'ss-val', state.intensity + '%');
+  s.addEventListener('input', function () {
+    state.intensity = parseFloat(s.value); sv.textContent = s.value + '%';
+    saveState(); applyEQ(); applyExcite(); ui.eqDirty = true;
   });
-  row2.appendChild(srng); row2.appendChild(sval);
-  parent.appendChild(row2);
-
+  sr.appendChild(s); sr.appendChild(sv);
+  hero.appendChild(sr);
   renderSimple();
 }
 
-// 旋钮 → 模块（0-100）
 function setKnob(k, v) {
   var m = state.modules;
-  if (k === 'bass') { m.bass.on = v > 2; m.bass.amount = Math.max(0, Math.min(1, v / 100 * 1.0)); }
+  if (k === 'bass') { m.bass.on = v > 2; m.bass.amount = Math.max(0, Math.min(1, v / 100)); }
   else if (k === 'air') {
     m.excite.air = v / 100 * 12;
     if (v > 2) { if (m.excite.type === 'off') m.excite.type = 'soft'; m.excite.drive = Math.max(m.excite.drive || 0, 0.25); }
@@ -1067,8 +852,6 @@ function setKnob(k, v) {
   }
   saveState(); applyAll();
 }
-
-// 模块 → 旋钮（切预设后同步位置）
 function knobsFromModules() {
   var m = state.modules;
   return {
@@ -1081,13 +864,248 @@ function knobsFromModules() {
 function renderSimple() {
   if (!ui.knobs) return;
   var kv = knobsFromModules();
-  var ranges = ui.knobs.querySelectorAll('.ss-knob-r');
-  for (var i = 0; i < ranges.length; i++) {
-    var k = ranges[i].getAttribute('data-knob');
-    ranges[i].value = kv[k];
-    var vEl = ranges[i].parentNode.querySelector('.ss-knob-v');
-    if (vEl) vEl.textContent = kv[k];
+  var rs = ui.knobs.querySelectorAll('.ss-knob-r');
+  for (var i = 0; i < rs.length; i++) {
+    var k = rs[i].getAttribute('data-knob');
+    rs[i].value = kv[k];
+    var v = rs[i].parentNode.querySelector('.ss-knob-v');
+    if (v) v.textContent = kv[k];
   }
+}
+
+// ---------------- 均衡 ----------------
+function buildEQPage(p) {
+  p.appendChild(el('p', 'ss-hint', '拖动曲线上的圆点调频率/增益，下方逐段微调。双击数值复位。'));
+  ui.eqCanvas = el('canvas', 'ss-eqcurve'); ui.eqCanvas.width = 1040; ui.eqCanvas.height = 150;
+  p.appendChild(ui.eqCanvas); ui.eqc = ui.eqCanvas.getContext('2d');
+  bindEQDrag();
+  var box = el('div', 'ss-bands'); p.appendChild(box); ui.bandsBox = box;
+  // 只建一次，后续只更新数值
+  ui.bandCtl = [];
+  state.modules.eq.bands.forEach(function (b, i) {
+    var line = el('div', 'ss-band');
+    var name = el('span', 'ss-band-n', EQ_FREQS[i] >= 1000 ? (EQ_FREQS[i] / 1000) + 'k' : EQ_FREQS[i]);
+    var gs = el('input', 'ss-rng'); gs.type = 'range'; gs.min = -15; gs.max = 15; gs.step = 0.5; gs.value = b.gain;
+    var gv = el('span', 'ss-val', num(b.gain, 1) + 'dB');
+    gs.addEventListener('input', function () {
+      b.gain = parseFloat(gs.value); gv.textContent = num(b.gain, 1) + 'dB';
+      applyEQ(); ui.eqDirty = true;
+    });
+    gs.addEventListener('dblclick', function () { b.gain = 0; gs.value = 0; gv.textContent = '0.0dB'; applyEQ(); ui.eqDirty = true; });
+    var more = el('button', 'ss-band-more', '⋯'); more.title = '类型/频率/Q';
+    var detail = el('div', 'ss-band-detail'); detail.style.display = 'none';
+    var typeSel = select([
+      { value: 'peaking', label: '峰值' }, { value: 'lowshelf', label: '低架' }, { value: 'highshelf', label: '高架' },
+      { value: 'lowpass', label: '低通' }, { value: 'highpass', label: '高通' }
+    ], b.type, function (v) { b.type = v; applyEQ(); ui.eqDirty = true; });
+    var fSl = slider(20, 20000, 1, b.freq, function (v) { b.freq = v; applyEQ(); ui.eqDirty = true; },
+      function (x) { return x >= 1000 ? (x / 1000).toFixed(1) + 'k' : Math.round(x); });
+    var qSl = slider(0.1, 10, 0.1, b.q, function (v) { b.q = v; applyEQ(); ui.eqDirty = true; }, function (x) { return num(x, 1); });
+    detail.appendChild(row('类型', typeSel));
+    detail.appendChild(row('频率', fSl.s, fSl.v));
+    detail.appendChild(row('Q', qSl.s, qSl.v));
+    more.addEventListener('click', function (e) {
+      e.preventDefault(); var open = detail.style.display !== 'block';
+      detail.style.display = open ? 'block' : 'none'; more.classList.toggle('ss-on', open);
+    });
+    line.appendChild(name); line.appendChild(gs); line.appendChild(gv); line.appendChild(more);
+    box.appendChild(line); box.appendChild(detail);
+    ui.bandCtl.push({ gain: gs, gv: gv, typeSel: typeSel, freq: fSl, q: qSl, band: b });
+  });
+  var flat = el('button', 'ss-btn', '全部归零');
+  flat.addEventListener('click', function (e) {
+    e.preventDefault();
+    state.modules.eq = { bands: defaultBands() };
+    syncBands(); applyEQ(); ui.eqDirty = true; toast('EQ 已归零', 'ok');
+  });
+  p.appendChild(flat);
+}
+// 把 state 里的 EQ 值刷到已建好的控件上（不重建 DOM）
+function syncBands() {
+  for (var i = 0; i < ui.bandCtl.length; i++) {
+    var c = ui.bandCtl[i], b = state.modules.eq.bands[i];
+    if (!b) continue;
+    c.gain.value = b.gain; c.gv.textContent = num(b.gain, 1) + 'dB';
+    c.typeSel.value = b.type || 'peaking';
+    c.freq.set(b.freq); c.q.set(b.q);
+  }
+}
+
+﻿
+// ---------------- 动态 / 混响 / 声场 / IO / 生态 ----------------
+function buildDynPage(p) {
+  var g1 = group('激励 / 饱和'); p.appendChild(g1);
+  var m = state.modules.excite;
+  g1.appendChild(row('类型', select([
+    { value: 'off', label: '关闭' }, { value: 'tube', label: '电子管' }, { value: 'tape', label: '磁带' }, { value: 'soft', label: '柔和' }
+  ], m.type, function (v) { m.type = v; applyExcite(); })));
+  var d = slider(0, 1, 0.05, m.drive, function (v) { m.drive = v; applyExcite(); }, function (x) { return num(x, 1); });
+  var a = slider(0, 12, 0.5, m.air, function (v) { m.air = v; applyExcite(); }, function (x) { return num(x, 1); });
+  g1.appendChild(row('驱动', d.s, d.v)); g1.appendChild(row('空气感', a.s, a.v));
+
+  var g2 = group('压缩器'); p.appendChild(g2);
+  var c = state.modules.comp;
+  var cw = el('div', 'ss-cols');
+  [['阈值dB', 'th', -60, 0, 1, 0], ['拐点', 'knee', 0, 40, 1, 0], ['比率', 'ratio', 1, 20, 0.5, 0],
+   ['启动s', 'at', 0, 1, 0.005, 2], ['释放s', 'rel', 0, 1, 0.01, 2], ['补偿dB', 'makeup', -12, 12, 0.5, 1]].forEach(function (cfg) {
+    var s = slider(cfg[2], cfg[3], cfg[4], c[cfg[1]], function (v) { c[cfg[1]] = v; applyComp(); }, function (x) { return num(x, cfg[5]); });
+    cw.appendChild(row(cfg[0], s.s, s.v));
+  });
+  g2.appendChild(cw);
+  var lc = check('真峰限幅', c.limiter, function (v) { c.limiter = v; applyComp(); });
+  g2.appendChild(lc.wrap);
+  var ce = slider(-12, 0, 0.5, c.ceiling == null ? -1 : c.ceiling, function (v) { c.ceiling = v; applyComp(); }, function (x) { return num(x, 1) + 'dB'; });
+  g2.appendChild(row('限幅顶', ce.s, ce.v));
+}
+
+function buildSpacePage(p) {
+  var g = group('卷积混响'); p.appendChild(g);
+  var m = state.modules.reverb;
+  var opts = Object.keys(IR_DEFS).map(function (k) { return { value: k, label: IR_DEFS[k].label }; });
+  opts.push({ value: 'custom', label: '自定义 IR…' });
+  g.appendChild(row('空间', select(opts, m.ir, function (v) {
+    m.ir = v; if (v === 'custom' && !CUSTOM_IR) openIRPicker(); applyReverb();
+    toast('混响：' + (IR_DEFS[v] ? IR_DEFS[v].label : '自定义'));
+  })));
+  var w = slider(0, 1, 0.01, m.wet, function (v) { m.wet = v; applyReverb(); }, function (x) { return Math.round(x * 100) + '%'; });
+  var pd = slider(0, 200, 1, m.predelay, function (v) { m.predelay = v; applyReverb(); }, function (x) { return Math.round(x) + 'ms'; });
+  var sz = slider(0.5, 4, 0.1, m.size, function (v) { m.size = v; applyReverb(); }, function (x) { return num(x, 1); });
+  g.appendChild(row('湿度', w.s, w.v)); g.appendChild(row('预延时', pd.s, pd.v)); g.appendChild(row('尺寸', sz.s, sz.v));
+  var imp = el('button', 'ss-btn', '导入自定义 IR (.wav)');
+  imp.addEventListener('click', function (e) { e.preventDefault(); openIRPicker(); });
+  g.appendChild(imp);
+  g.appendChild(el('p', 'ss-hint', CUSTOM_IR ? ('已载入：' + CUSTOM_IR_NAME) : '可选单/双声道 wav 作为脉冲响应'));
+}
+
+function buildStereoPage(p) {
+  var g = group('立体声场 / 中侧'); p.appendChild(g);
+  var m = state.modules.stereo;
+  var w = slider(-1, 1, 0.05, m.width, function (v) { m.width = v; applyStereo(); }, function (x) { return Math.round((x + 1) / 2 * 100); });
+  var mid = slider(-12, 12, 0.5, m.mid, function (v) { m.mid = v; applyStereo(); }, function (x) { return num(x, 1) + 'dB'; });
+  var side = slider(-12, 12, 0.5, m.side, function (v) { m.side = v; applyStereo(); }, function (x) { return num(x, 1) + 'dB'; });
+  var lc = slider(0, 1000, 10, m.sideLowcut, function (v) { m.sideLowcut = v; applyStereo(); }, function (x) { return x > 0 ? Math.round(x) + 'Hz' : '关'; });
+  g.appendChild(row('宽度', w.s, w.v)); g.appendChild(row('中央M', mid.s, mid.v));
+  g.appendChild(row('侧向S', side.s, side.v)); g.appendChild(row('侧向低切', lc.s, lc.v));
+
+  var g2 = group('低音谐波增强'); p.appendChild(g2);
+  var bm = state.modules.bass;
+  var on = check('开启', bm.on, function (v) { bm.on = v; applyBass(); });
+  g2.appendChild(on.wrap);
+  var f = slider(30, 250, 5, bm.freq, function (v) { bm.freq = v; applyBass(); }, function (x) { return Math.round(x) + 'Hz'; });
+  var am = slider(0, 1, 0.05, bm.amount, function (v) { bm.amount = v; applyBass(); }, function (x) { return num(x, 1); });
+  g2.appendChild(row('中心频率', f.s, f.v)); g2.appendChild(row('谐波量', am.s, am.v));
+}
+
+function buildIOPage(p) {
+  var g = group('输入'); p.appendChild(g);
+  var m = state.modules.input;
+  var c = check('响度自动匹配（配合智能）', m.autoLoud, function (v) { m.autoLoud = v; if (!v) m.autoGainDb = 0; applyInput(); });
+  g.appendChild(c.wrap);
+  var ig = slider(-24, 24, 0.5, m.gain, function (v) { m.gain = v; applyInput(); }, function (x) { return num(x, 1) + 'dB'; });
+  g.appendChild(row('输入增益', ig.s, ig.v));
+
+  var g2 = group('输出'); p.appendChild(g2);
+  var om = state.modules.output;
+  var og = slider(-24, 12, 0.5, om.gain, function (v) { om.gain = v; applyOutput(); }, function (x) { return num(x, 1) + 'dB'; });
+  g2.appendChild(row('输出增益', og.s, og.v));
+  g2.appendChild(el('p', 'ss-hint', '音量/静音由插件接管补偿，宿主滑块照常有效'));
+}
+
+function buildLibPage(p) {
+  var g = group('预设分享'); p.appendChild(g);
+  g.appendChild(el('p', 'ss-hint', '导出当前配置成 JSON 发给别人，或粘贴别人的 JSON 导入'));
+  var r = el('div', 'ss-row2');
+  var exp = el('button', 'ss-btn', '导出'); exp.addEventListener('click', function (e) { e.preventDefault(); exportPreset(); });
+  var imp = el('button', 'ss-btn', '导入'); imp.addEventListener('click', function (e) { e.preventDefault(); importPreset(); });
+  var cp = el('button', 'ss-btn', '复制'); cp.addEventListener('click', function (e) { e.preventDefault(); copyConfig(); });
+  r.appendChild(exp); r.appendChild(imp); r.appendChild(cp); g.appendChild(r);
+  ui.codeBox = el('textarea', 'ss-code'); ui.codeBox.placeholder = 'JSON'; g.appendChild(ui.codeBox);
+  ui.stat = el('div', 'ss-stat', ''); g.appendChild(ui.stat);
+}
+function currentConfig() { return { v: 1, name: state.preset, intensity: state.intensity, modules: state.modules }; }
+function exportPreset() {
+  var txt = JSON.stringify(currentConfig());
+  if (ui.codeBox) ui.codeBox.value = txt;
+  try { navigator.clipboard.writeText(txt); } catch (e) {}
+  if (ui.stat) ui.stat.textContent = '已导出 ' + txt.length + ' 字节';
+  toast('已导出', 'ok');
+}
+function importPreset() {
+  var txt = ui.codeBox ? ui.codeBox.value.trim() : '';
+  if (!txt) { toast('先粘贴 JSON', 'off'); return; }
+  try {
+    var o = JSON.parse(txt); if (!o.modules) throw new Error('格式不对');
+    state.modules = deepClone(o.modules);
+    state.intensity = o.intensity != null ? o.intensity : 100;
+    if (!state.modules.eq || !Array.isArray(state.modules.eq.bands) || state.modules.eq.bands.length !== 10) state.modules.eq = { bands: defaultBands() };
+    state.preset = 'imported'; state.smart = false; state.ab = null;
+    saveState(); applyAll(); syncBands(); ui.eqDirty = true;
+    if (ui.stat) ui.stat.textContent = '导入成功';
+    toast('导入成功', 'ok');
+  } catch (e) { if (ui.stat) ui.stat.textContent = '导入失败：' + e.message; toast('导入失败', 'off'); }
+}
+function copyConfig() {
+  var txt = JSON.stringify(currentConfig());
+  if (ui.codeBox) ui.codeBox.value = txt;
+  try { navigator.clipboard.writeText(txt); } catch (e) {}
+  toast('已复制', 'ok');
+}
+
+// ---------------- 我的预设 ----------------
+function renderUserPresets() {
+  var g = ui.panel && ui.panel.querySelector('#ss-user-grid'); if (!g) return;
+  g.innerHTML = '';
+  Object.keys(USER_PRESETS).forEach(function (name) {
+    var r = el('div', 'ss-user-row');
+    var b = el('button', 'ss-item', name); b.addEventListener('click', function (e) { e.preventDefault(); applyUserPreset(name); });
+    var d = el('button', 'ss-del', '×'); d.addEventListener('click', function (e) { e.preventDefault(); delUserPreset(name); });
+    r.appendChild(b); r.appendChild(d); g.appendChild(r);
+  });
+}
+
+// ---------------- IR 导入 ----------------
+function openIRPicker() {
+  var inp = el('input'); inp.type = 'file'; inp.accept = '.wav,audio/wav'; inp.style.display = 'none'; document.body.appendChild(inp);
+  inp.addEventListener('change', function () {
+    var f = inp.files && inp.files[0]; if (!f) return;
+    var fr = new FileReader();
+    fr.onload = function () {
+      try {
+        ctx.decodeAudioData(fr.result.slice(0), function (buf) {
+          CUSTOM_IR = buf; CUSTOM_IR_NAME = f.name; state.modules.reverb.ir = 'custom'; applyReverb();
+          toast('已载入 IR：' + f.name, 'ok'); saveState();
+        }, function () { toast('IR 解码失败，用 wav', 'off'); });
+      } catch (e) { toast('IR 载入失败', 'off'); }
+    };
+    fr.readAsArrayBuffer(f); inp.remove();
+  });
+  inp.click();
+}
+
+// ---------------- EQ 拖点 ----------------
+function bindEQDrag() {
+  var drag = -1;
+  function pt(e) { var r = ui.eqCanvas.getBoundingClientRect(); return { x: (e.clientX - r.left) * ui.eqCanvas.width / r.width, y: (e.clientY - r.top) * ui.eqCanvas.height / r.height }; }
+  ui.eqCanvas.addEventListener('pointerdown', function (e) {
+    var q = pt(e), best = -1, bd = 26;
+    state.modules.eq.bands.forEach(function (b, i) { var c = eqCanvasPos(b, i), d = Math.hypot(c.x - q.x, c.y - q.y); if (d < bd) { bd = d; best = i; } });
+    if (best >= 0) { drag = best; try { ui.eqCanvas.setPointerCapture(e.pointerId); } catch (er) {} }
+  });
+  ui.eqCanvas.addEventListener('pointermove', function (e) {
+    if (drag < 0) return;
+    var q = pt(e), W = ui.eqCanvas.width, H = ui.eqCanvas.height, b = state.modules.eq.bands[drag];
+    b.freq = Math.round(clamp(20 * Math.pow(1000, q.x / W), 20, 20000));
+    b.gain = +clamp((H / 2 - q.y) / (H / 2 - 10) * 15, -15, 15).toFixed(1);
+    applyEQ(); ui.eqDirty = true; drawEQCurve();
+    var c = ui.bandCtl[drag];
+    if (c) { c.gain.value = b.gain; c.gv.textContent = num(b.gain, 1) + 'dB'; c.freq.set(b.freq); }
+  });
+  ui.eqCanvas.addEventListener('pointerup', function () { if (drag >= 0) { drag = -1; toast('频段已更新'); } });
+}
+function eqCanvasPos(b, i) {
+  var W = ui.eqCanvas.width, H = ui.eqCanvas.height;
+  var f = clamp(b.freq || EQ_FREQS[i], 20, 20000);
+  return { x: Math.log(f / 20) / Math.log(1000) * W, y: H / 2 - clamp((b.gain || 0), -15, 15) / 15 * (H / 2 - 10) };
 }
 
 
@@ -1097,140 +1115,188 @@ function toggleAB() {
   else { state.ab = deepClone(state.modules); state.modules = defaultState().modules; }
   if (!Array.isArray(state.modules.eq.bands) || state.modules.eq.bands.length !== 10) state.modules.eq = { bands: defaultBands() };
   state.smart = false; saveState(); applyAll();
-  toast(state.ab ? 'B · 原音对照' : 'A · 我的调音', state.ab ? 'off' : 'ok');
+  toast(state.ab ? 'B · 原音' : 'A · 我的调音', state.ab ? 'off' : 'ok');
 }
 
-// ---------------- 装配 UI ----------------
-// 只在主界面建 UI。桌面歌词窗(hash=#lyrics) 和全屏歌词页(#/lyrics) 一律不建，
-// 避免按钮/面板漏进歌词界面；音频接管不受影响（hook 在 p3 独立运行）。
+// ---------------- 装配 ----------------
 function isMainUI() {
   var h = (location.hash || '').toLowerCase();
-  if (h.indexOf('lyrics') >= 0) return false;      // #lyrics 与 #/lyrics 都排除
-  if (h.indexOf('/mv') >= 0 || h.indexOf('/video') >= 0) return false;
+  if (h.indexOf('lyrics') >= 0 || h.indexOf('/mv') >= 0 || h.indexOf('/video') >= 0) return false;
   if (!document.body) return false;
-  // 全屏歌词页有 .lyrics-screen，桌面歌词窗有 .lyrics-content-wrapper
   if (document.querySelector('.lyrics-screen, .lyrics-content-wrapper')) return false;
   return true;
 }
 function ensureUI() {
   if (ui.btn && ui.btn.parentNode) return;
   if (!isMainUI()) return;
+  var host = document.querySelector('.extra-controls');
+  if (!host) return;            // 没有播放栏控件区就不是主界面，绝不往页面空白处放按钮
   var btn = el('button', 'ss-toggle', '♪'); btn.id = 'ss-toggle'; btn.title = '声境音效 (Alt+Shift+P)';
   btn.addEventListener('click', function (e) { e.preventDefault(); e.stopPropagation(); togglePanel(); });
-  var host = document.querySelector('.extra-controls');
-  if (host) { var ref = host.querySelector('.playback-speed'); if (ref) host.insertBefore(btn, ref.nextSibling); else host.appendChild(btn); }
-  else return;   // 没有播放栏控件区就不是主界面，不建按钮，绝不放页面空白处
+  var ref = host.querySelector('.playback-speed');
+  if (ref) host.insertBefore(btn, ref.nextSibling); else host.appendChild(btn);
   ui.btn = btn;
 
-  ui.panel = buildPanel(); document.body.appendChild(ui.panel);
-  renderBands(); renderUserPresets();
+  ui.panel = buildPanel();
+  document.body.appendChild(ui.panel);
+  buildPresetSide(ui.side);
+  buildHero(ui.hero);
+  buildEQPage(page(ui.pages, 'eq'));
+  buildDynPage(page(ui.pages, 'dyn'));
+  buildSpacePage(page(ui.pages, 'space'));
+  buildStereoPage(page(ui.pages, 'stereo'));
+  buildIOPage(page(ui.pages, 'io'));
+  buildLibPage(page(ui.pages, 'lib'));
   switchTab(state.tab === 'presets' ? 'eq' : (state.tab || 'eq'));
-  if (ui.simple) ui.simple.style.display = 'block';
-  if (ui.advanced) ui.advanced.style.display = 'block';
-  if (ui.timer) clearInterval(ui.timer);
-  ui.timer = setInterval(diagTick, 100);
-  updateUI(); drawEQCurve();
+  syncBands(); renderUserPresets(); updateUI(); ui.eqDirty = true;
 }
-function togglePanel() { state.open = !state.open; saveState(); if (ui.panel) ui.panel.classList.toggle('ss-hidden', !state.open); updateUI(); }
+
+function togglePanel() {
+  state.open = !state.open; saveState();
+  if (ui.panel) ui.panel.classList.toggle('ss-hidden', !state.open);
+  if (state.open) { fitPlayerGap(); startLoop(); } else { stopLoop(); }
+  updateUI();
+}
+
+// 按宿主播放栏实际高度留出底部空间
+function fitPlayerGap() {
+  if (!ui.panel) return;
+  try {
+    var bar = document.querySelector('.player-container, #player-container');
+    var h = bar ? Math.round(bar.getBoundingClientRect().height) : 88;
+    ui.panel.style.bottom = Math.max(0, Math.min(200, h)) + 'px';
+  } catch (e) { ui.panel.style.bottom = '88px'; }
+}
+
 function updateUI() {
   if (!ui.panel) return;
   var btns = ui.panel.querySelectorAll('.ss-item[data-id]');
-  for (var i = 0; i < btns.length; i++) btns[i].classList.toggle('ss-active', btns[i].getAttribute('data-id') === state.preset);
+  for (var i = 0; i < btns.length; i++) btns[i].classList.toggle('ss-on', btns[i].getAttribute('data-id') === state.preset);
   var sb = ui.panel.querySelector('.ss-smart'); if (sb) sb.classList.toggle('ss-on', state.smart);
-  try { renderSimple(); } catch (e) {}
+  renderSimple();
   if (ui.pw) { ui.pw.textContent = state.enabled ? '● 开' : '○ 关'; ui.pw.classList.toggle('ss-on', state.enabled); }
   if (ui.btn) ui.btn.classList.toggle('ss-on', state.enabled);
   if (ui.status) {
-    var p = findPreset(state.preset);
-    var label = state.preset === 'smart' ? '智能调音' : (state.preset.indexOf('user:') === 0 ? state.preset.slice(5) : (state.preset === 'imported' ? '导入配置' : p.name));
-    ui.status.textContent = (state.enabled ? '● 音效开启' : '○ 原音') + '　|　' + label + '　|　强度 ' + state.intensity + '%' + (state.smart ? '　[智能]' : '') + (state.ab ? '　[A/B:B]' : '');
+    var nm = state.preset === 'smart' ? '智能调音' : (state.preset.indexOf('user:') === 0 ? state.preset.slice(5) : (state.preset === 'imported' ? '导入配置' : findPreset(state.preset).name));
+    ui.status.textContent = (state.enabled ? '● 开启' : '○ 原音') + ' · ' + nm + ' · 强度 ' + state.intensity + '%' + (state.smart ? ' · 智能' : '') + (state.ab ? ' · B' : '');
   }
 }
 
-// ---------------- 可视化 ----------------
+// ---------------- 渲染循环（只在面板打开时跑） ----------------
+var lastDiag = 0;
+function startLoop() {
+  if (ui.raf) return;
+  var tick = function (t) {
+    if (!state.open) { ui.raf = null; return; }
+    sampleLevels();
+    drawViz();
+    if (ui.eqDirty && ui.tab === 'eq') drawEQCurve();
+    if (t - lastDiag > 500) { lastDiag = t; updateDiag(); }
+    ui.raf = requestAnimationFrame(tick);
+  };
+  ui.raf = requestAnimationFrame(tick);
+  fitPlayerGap();
+}
+function stopLoop() { if (ui.raf) { cancelAnimationFrame(ui.raf); ui.raf = null; } }
+
+// 空闲时预生成常用混响 IR，避免第一次切到某空间时卡一下
+var IR_WARM = ['room', 'hall', 'stage', 'plate', 'church', 'spring'];
+function warmIR(i) {
+  i = i || 0;
+  if (i >= IR_WARM.length) return;
+  if (!ctx) { setTimeout(function () { warmIR(i); }, 400); return; }
+  var k = IR_WARM[i], key = k + ':2';
+  try { if (!irCache[key]) irCache[key] = makeIR(IR_DEFS[k], 2); } catch (e) {}
+  setTimeout(function () { warmIR(i + 1); }, 160);
+}
+
 function drawViz() {
   if (!ui.cctx || !nodes) return;
   var c = ui.cctx, W = ui.canvas.width, H = ui.canvas.height;
   c.clearRect(0, 0, W, H);
   var spec = readSpectrum();
   if (spec) {
-    var step = Math.max(1, Math.floor(spec.length / 64));
-    for (var x = 0; x < 64; x++) {
+    var bars = 96, step = Math.max(1, Math.floor(spec.length / bars)), bw = W / bars;
+    for (var x = 0; x < bars; x++) {
       var v = 0, cc = 0;
       for (var k = 0; k < step; k++) { var idx = x * step + k; if (idx < spec.length && spec[idx] > -100) { v += (spec[idx] + 100); cc++; } }
-      var mag = cc ? (v / cc) / 100 : 0;
-      c.fillStyle = 'rgba(94,234,212,' + (0.3 + mag * 0.7) + ')';
-      c.fillRect(x * (W / 64), H - Math.max(1, mag * H), (W / 64) - 1, Math.max(1, mag * H));
+      var mag = cc ? (v / cc) / 100 : 0, h = Math.max(1, mag * H);
+      var g = c.createLinearGradient(0, H - h, 0, H);
+      g.addColorStop(0, 'rgba(94,234,212,.95)'); g.addColorStop(1, 'rgba(59,130,246,.35)');
+      c.fillStyle = g; c.fillRect(x * bw + 0.5, H - h, bw - 1.2, h);
     }
   }
   if (ui.meterBar) ui.meterBar.style.width = Math.min(100, rms * 260).toFixed(0) + '%';
 }
-// 曲线只依赖 state，不依赖 nodes；按 type 画 shelf / pass，量程 ±15dB 放大到可见
+
 function drawEQCurve() {
   if (!ui.eqc || !ui.eqCanvas) return;
   if (!state.modules.eq || !Array.isArray(state.modules.eq.bands)) state.modules.eq = { bands: defaultBands() };
-  var c = ui.eqc, W = ui.eqCanvas.width, H = ui.eqCanvas.height;
+  var c = ui.eqc, W = ui.eqCanvas.width, H = ui.eqCanvas.height, mid = H / 2, amp = H / 2 - 10;
   c.clearRect(0, 0, W, H);
-  c.strokeStyle = 'rgba(255,255,255,.10)';
-  for (var g = -10; g <= 10; g += 5) { var gy = H / 2 - g / 15 * (H / 2 - 10); c.beginPath(); c.moveTo(0, gy); c.lineTo(W, gy); c.stroke(); }
-  c.strokeStyle = 'rgba(94,234,212,.85)'; c.lineWidth = 2; c.beginPath();
+  // 网格
+  c.strokeStyle = 'rgba(255,255,255,.06)'; c.lineWidth = 1;
+  for (var g = -10; g <= 10; g += 5) { var gy = mid - g / 15 * amp; c.beginPath(); c.moveTo(0, gy); c.lineTo(W, gy); c.stroke(); }
+  for (var fx = 100; fx <= 10000; fx *= 10) { var gx = Math.log(fx / 20) / Math.log(1000) * W; c.beginPath(); c.moveTo(gx, 0); c.lineTo(gx, H); c.stroke(); }
+  // 曲线
   var bands = state.modules.eq.bands, k = clamp(state.intensity, 0, 100) / 100;
-  for (var x = 0; x <= W; x++) {
+  c.strokeStyle = '#5eead4'; c.lineWidth = 2.5; c.beginPath();
+  for (var x = 0; x <= W; x += 2) {
     var f = 20 * Math.pow(1000, x / W), sum = 0;
     for (var i = 0; i < bands.length; i++) {
-      var b = bands[i], gain = (b.gain || 0) * k, cf = clamp(b.freq || EQ_FREQS[i], 20, 20000), q = clamp(b.q || 1, 0.1, 10);
-      var type = b.type || 'peaking';
-      var contrib;
-      if (type === 'lowshelf') contrib = gain * (1 / (1 + Math.pow(f / cf, 2)));
-      else if (type === 'highshelf') contrib = gain * (1 / (1 + Math.pow(cf / f, 2)));
-      else if (type === 'lowpass') contrib = -15 * (1 / (1 + Math.pow(f / cf, -4)));
-      else if (type === 'highpass') contrib = -15 * (1 / (1 + Math.pow(f / cf, 4)));
-      else { var ratio = Math.log(f / cf) / Math.log(2); contrib = gain * Math.exp(-(ratio * ratio) / (2 * q * q * 0.32)); }
+      var b = bands[i], gain = (b.gain || 0) * k, cf = clamp(b.freq || EQ_FREQS[i], 20, 20000), q = clamp(b.q || 1, 0.1, 10), type = b.type || 'peaking', contrib;
+      if (type === 'lowshelf') contrib = gain / (1 + Math.pow(f / cf, 2));
+      else if (type === 'highshelf') contrib = gain / (1 + Math.pow(cf / f, 2));
+      else if (type === 'lowpass') contrib = -15 / (1 + Math.pow(f / cf, -4));
+      else if (type === 'highpass') contrib = -15 / (1 + Math.pow(f / cf, 4));
+      else { var ratio = Math.log(f / cf) / Math.LN2; contrib = gain * Math.exp(-(ratio * ratio) / (2 * q * q * 0.32)); }
       sum += contrib;
     }
-    var y = H / 2 - clamp(sum, -16, 16) / 15 * (H / 2 - 10);
+    var y = mid - clamp(sum, -16, 16) / 15 * amp;
     if (x === 0) c.moveTo(x, y); else c.lineTo(x, y);
   }
   c.stroke();
-  // 可拖点
+  // 圆点
   for (var j = 0; j < bands.length; j++) {
     var pt = eqCanvasPos(bands[j], j);
-    c.beginPath(); c.arc(pt.x, pt.y, 5, 0, 6.28); c.fillStyle = '#5eead4'; c.fill();
-    c.lineWidth = 1.5; c.strokeStyle = '#0f172a'; c.stroke();
+    c.beginPath(); c.arc(pt.x, pt.y, 6, 0, 6.2832);
+    c.fillStyle = '#0f172a'; c.fill();
+    c.lineWidth = 2.5; c.strokeStyle = '#5eead4'; c.stroke();
   }
+  ui.eqDirty = false;
 }
+
 function diagText() {
-  return 'hook:' + (claimed ? 'cap' : 'wait') + ' ctx:' + (ctx ? ctx.state : '-') + ' chain:' + diag.chain +
-    ' rms:' + rms.toFixed(3) + '(' + dbVal() + 'dB) pk:' + peak.toFixed(2) +
-    ' on:' + state.enabled + ' preset:' + state.preset + (state.smart ? ' [智能]' : '') + (diag.err !== '-' ? ' err:' + diag.err : '');
+  return (claimed ? '已接管' : '等待播放') + ' · ' + (ctx ? ctx.state : '-') + ' · 链' + diag.chain +
+    ' · ' + dbVal() + 'dB · ' + state.preset + (diag.err !== '-' ? ' · ' + diag.err : '');
 }
 function updateDiag() { if (ui.diag) ui.diag.textContent = diagText(); }
-
 // ---------------- 调试句柄 ----------------
 window.__ss = {
   diag: function () { return { installed: true, audio: claimed ? 'captured' : 'none', src: diag.src, ctx: ctx ? ctx.state : 'none',
     chain: diag.chain, rms: +rms.toFixed(4), peak: +peak.toFixed(4), preset: state.preset, intensity: state.intensity,
-    enabled: state.enabled, smart: state.smart, ab: !!state.ab, tab: state.tab, err: diag.err, lastSmart: window.__ss_lastSmart || null }; },
+    enabled: state.enabled, smart: state.smart, ab: !!state.ab, tab: state.tab, err: diag.err, open: state.open,
+    lastSmart: window.__ss_lastSmart || null }; },
   params: function () {
     if (!nodes) return null;
     return { eq: nodes.eq.map(function (f) { return +f.gain.value.toFixed(2); }), eqTypes: nodes.eq.map(function (f) { return f.type; }),
-      bassOn: +nodes.bassGain.gain.value.toFixed(3), bassCurve: state.modules.bass.amount,
-      exciteWet: +nodes.exciteWet.gain.value.toFixed(3), exciteDry: +nodes.exciteDry.gain.value.toFixed(3),
+      bassOn: +nodes.bassGain.gain.value.toFixed(3), exciteWet: +nodes.exciteWet.gain.value.toFixed(3),
       exciteType: state.modules.excite.type, air: +nodes.air.gain.value.toFixed(2),
-      comp: { th: nodes.comp.threshold.value, ratio: nodes.comp.ratio.value, knee: nodes.comp.knee.value },
-      limiter: { th: nodes.limiter.threshold.value, ratio: nodes.limiter.ratio.value },
+      comp: { th: nodes.comp.threshold.value, ratio: nodes.comp.ratio.value },
       reverb: { wet: +nodes.revSend.gain.value.toFixed(3), ir: state.modules.reverb.ir },
       stereo: { width: state.modules.stereo.width, mid: +nodes.mid.gain.value.toFixed(3), side: +nodes.side.gain.value.toFixed(3) },
-      input: +nodes.input.gain.value.toFixed(3), output: +nodes.output.gain.value.toFixed(3), vol: +nodes.vol.gain.value.toFixed(3), bypass: !!nodes.bypass };
+      input: +nodes.input.gain.value.toFixed(3), output: +nodes.output.gain.value.toFixed(3), vol: +nodes.vol.gain.value.toFixed(3) };
   },
   state: function () { return deepClone(state.modules); },
   apply: function (id) { applyPreset(id); return window.__ss.diag(); },
   set: function (mod, key, val) { if (!state.modules[mod]) return null; state.modules[mod][key] = val; applyAll(); return window.__ss.params(); },
-  setEQ: function (i, obj) { if (!state.modules.eq.bands[i]) return null; for (var k in obj) state.modules.eq.bands[i][k] = obj[k]; applyEQ(); renderBands(); drawEQCurve(); return window.__ss.params().eq; },
-  setIntensity: function (v) { state.intensity = clamp(v, 0, 100) | 0; saveState(); applyEQ(); applyExcite(); drawEQCurve(); return window.__ss.params().eq; },
+  setEQ: function (i, obj) { if (!state.modules.eq.bands[i]) return null; for (var k in obj) state.modules.eq.bands[i][k] = obj[k]; applyEQ(); syncBands(); ui.eqDirty = true; drawEQCurve(); return window.__ss.params().eq; },
+  setIntensity: function (v) { state.intensity = clamp(v, 0, 100) | 0; saveState(); applyEQ(); applyExcite(); ui.eqDirty = true; return window.__ss.params().eq; },
   smart: function (on) { toggleSmart(on !== false); return window.__ss.diag(); },
   ab: function () { toggleAB(); return window.__ss.diag(); },
   enabled: function () { toggleEnabled(); return window.__ss.diag(); },
+  open: function () { if (!state.open) togglePanel(); return window.__ss.diag(); },
+  close: function () { if (state.open) togglePanel(); return window.__ss.diag(); },
   tab: function (k) { switchTab(k); return window.__ss.diag().tab; },
   exportCfg: function () { return JSON.stringify(currentConfig()); },
   importCfg: function (txt) { if (ui.codeBox) ui.codeBox.value = txt; importPreset(); return window.__ss.state(); },
@@ -1239,44 +1305,30 @@ window.__ss = {
   userPresets: function () { return Object.keys(USER_PRESETS); },
   saveUserPreset: function (n) { saveUserPreset(n); return Object.keys(USER_PRESETS); },
   applyUserPreset: function (n) { applyUserPreset(n); return window.__ss.diag(); },
-  eqCurve: function () { drawEQCurve(); return true; }
+  // 调试/性能分析用（只暴露函数引用，不改状态）
+  _fn: { applyPreset: function (id) { applyPreset(id); }, applyEQ: function () { applyEQ(); }, applyBass: function () { applyBass(); },
+    applyExcite: function () { applyExcite(); }, applyComp: function () { applyComp(); }, applyReverb: function () { applyReverb(); },
+    applyStereo: function () { applyStereo(); }, updateUI: function () { updateUI(); }, syncBands: function () { syncBands(); },
+    renderSimple: function () { renderSimple(); }, makeIR: function (ir, s) { return makeIR(IR_DEFS[ir] || IR_DEFS.room, s); },
+    bassCurve: function (a) { return bassCurve(a); }, makeCurve: function (k, d) { return makeCurve(k, d); } }
 };
-
-// 进/出歌词界面时收起或恢复 UI（音频接管始终不断）
-function syncUIVisibility() {
-  var show = isMainUI();
-  if (!show) {
-    if (ui.btn) ui.btn.style.display = 'none';
-    if (ui.panel) ui.panel.style.display = 'none';
-  } else {
-    if (!ui.btn || !ui.btn.parentNode) { ensureUI(); return; }
-    if (ui.btn) ui.btn.style.display = '';
-    if (ui.panel) ui.panel.style.display = '';
-  }
-}
 
 // ---------------- 启动 ----------------
 bindShortcuts();
 if (document.body) ensureUI();
 else document.addEventListener('DOMContentLoaded', function () { ensureUI(); });
-// 主界面轮询只在没建好 UI 时跑，建好后停掉，不进歌词界面就停
+setTimeout(function () { warmIR(0); }, 800);
 var _iv = setInterval(function () {
   if (!document.body) return;
-  if (isMainUI() && !ui.btn) { ensureUI(); }
+  if (isMainUI() && !ui.btn) ensureUI();
   if (ui.btn) clearInterval(_iv);
 }, 400);
-// 路由变化（hash 切页）与歌词界面挂载时同步显隐
-window.addEventListener('hashchange', syncUIVisibility);
-document.addEventListener('DOMContentLoaded', syncUIVisibility);
-// 轻量监听：只在 hash 或 .lyrics-screen 出现/消失时切 UI。桌面歌词窗 hash 固定为
-// lyrics，永远非主界面，直接不启轮询，省掉那个窗口的一切开销。
-var _lastUI = null;
-if ((location.hash || '').toLowerCase().indexOf('lyrics') < 0) {
-  setInterval(function () {
-    var now = isMainUI();
-    if (now !== _lastUI) { _lastUI = now; syncUIVisibility(); }
-  }, 600);
-}
-if (console && console.log) console.log(LOG + ' SonicScape 引擎已加载');
+window.addEventListener('hashchange', function () {
+  if (!isMainUI()) { if (state.open) { state.open = false; saveState(); if (ui.panel) ui.panel.classList.add('ss-hidden'); stopLoop(); } }
+  else if (!ui.btn) ensureUI();
+});
+document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && state.open) { e.preventDefault(); togglePanel(); } }, true);
+window.addEventListener('resize', function () { if (state.open) fitPlayerGap(); });
+if (console && console.log) console.log(LOG + ' SonicScape 已加载');
 })();
 
