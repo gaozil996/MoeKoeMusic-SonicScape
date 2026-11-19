@@ -1126,13 +1126,8 @@ function ensureUI() {
   btn.addEventListener('click', function (e) { e.preventDefault(); e.stopPropagation(); togglePanel(); });
   var host = document.querySelector('.extra-controls');
   if (host) { var ref = host.querySelector('.playback-speed'); if (ref) host.insertBefore(btn, ref.nextSibling); else host.appendChild(btn); }
-  else document.body.appendChild(btn);
+  else return;   // 没有播放栏控件区就不是主界面，不建按钮，绝不放页面空白处
   ui.btn = btn;
-  // 悬浮快捷开关（一键总开关，不依赖面板）
-  var fab = el('button', 'ss-fab', state.enabled ? '♪' : '✕'); fab.id = 'ss-fab';
-  fab.title = '一键开关音效 (Alt+Shift+S)';
-  fab.addEventListener('click', function (e) { e.preventDefault(); e.stopPropagation(); toggleEnabled(); });
-  document.body.appendChild(fab); ui.fab = fab;
 
   ui.panel = buildPanel(); document.body.appendChild(ui.panel);
   renderBands(); renderUserPresets();
@@ -1152,7 +1147,6 @@ function updateUI() {
   var sb = ui.panel.querySelector('.ss-smart'); if (sb) sb.classList.toggle('ss-on', state.smart);
   try { renderSimple(); } catch (e) {}
   if (ui.pw) { ui.pw.textContent = state.enabled ? '● 开' : '○ 关'; ui.pw.classList.toggle('ss-on', state.enabled); }
-  if (ui.fab) { ui.fab.textContent = state.enabled ? '♪' : '✕'; ui.fab.classList.toggle('ss-off', !state.enabled); }
   if (ui.btn) ui.btn.classList.toggle('ss-on', state.enabled);
   if (ui.status) {
     var p = findPreset(state.preset);
@@ -1261,12 +1255,10 @@ function syncUIVisibility() {
   var show = isMainUI();
   if (!show) {
     if (ui.btn) ui.btn.style.display = 'none';
-    if (ui.fab) ui.fab.style.display = 'none';
     if (ui.panel) ui.panel.style.display = 'none';
   } else {
     if (!ui.btn || !ui.btn.parentNode) { ensureUI(); return; }
     if (ui.btn) ui.btn.style.display = '';
-    if (ui.fab) ui.fab.style.display = '';
     if (ui.panel) ui.panel.style.display = '';
   }
 }
