@@ -674,7 +674,7 @@ function select(options, val, onChange) {
 }
 
 function buildPanel() {
-  var panel = el('div', 'ss-panel' + (state.open ? '' : ' ss-hidden'));
+  var panel = el('div', 'ss-panel ss-full' + (state.open ? '' : ' ss-hidden'));
   panel.id = 'ss-panel';
   var head = el('div', 'ss-head');
   var t = el('div', 'ss-title', '声境音效');
@@ -686,44 +686,69 @@ function buildPanel() {
   pw.addEventListener('click', function (e) { e.preventDefault(); toggleEnabled(); });
   ui.pw = pw;
   var smartBtn = el('button', 'ss-mini ss-smart', '智能'); smartBtn.addEventListener('click', function (e) { e.preventDefault(); toggleSmart(!state.smart); });
-  var advBtn = el('button', 'ss-mini ss-adv', '高级');
-  advBtn.title = '展开全部参数';
-  advBtn.addEventListener('click', function (e) { e.preventDefault(); switchView(state.view === 'advanced' ? 'simple' : 'advanced'); });
-  ui.advBtn = advBtn;
-  var close = el('button', 'ss-close', '×'); close.addEventListener('click', function (e) { e.preventDefault(); togglePanel(); });
-  hb.appendChild(pw); hb.appendChild(smartBtn); hb.appendChild(advBtn); hb.appendChild(close);
+  var abBtn = el('button', 'ss-mini', 'A/B'); abBtn.addEventListener('click', function (e) { e.preventDefault(); toggleAB(); });
+  var close = el('button', 'ss-close', '×'); close.title = '关闭 (Esc)'; close.addEventListener('click', function (e) { e.preventDefault(); togglePanel(); });
+  hb.appendChild(pw); hb.appendChild(abBtn); hb.appendChild(smartBtn); hb.appendChild(close);
   head.appendChild(hb); panel.appendChild(head);
 
-  // 当前状态条（点击/切换都有明确反馈）
   ui.status = el('div', 'ss-status', ''); panel.appendChild(ui.status);
 
-  // 简单视图（默认）：四个旋钮 + 精选预设，够用不烧脑
-  ui.simple = el('div', 'ss-simple'); panel.appendChild(ui.simple);
-  buildSimpleView(ui.simple);
+  // 两栏主体：左预设库，右调音区
+  var body = el('div', 'ss-body');
+  var side = el('div', 'ss-side'); ui.side = side; buildPresetSide(side);
+  var main = el('div', 'ss-main'); ui.main = main;
 
-  // 高级视图：全部参数，点「高级」才展开
-  ui.advanced = el('div', 'ss-advanced');
-  if (state.view !== 'advanced') ui.advanced.style.display = 'none';
-  panel.appendChild(ui.advanced);
+  // 四个人话旋钮
+  ui.simple = el('div', 'ss-simple'); main.appendChild(ui.simple); buildSimpleView(ui.simple);
 
+  // 频谱 + 电平
+  var vizWrap = el('div', 'ss-viz');
+  ui.canvas = el('canvas', 'ss-spectrum'); ui.canvas.width = 900; ui.canvas.height = 90;
+  vizWrap.appendChild(ui.canvas); ui.cctx = ui.canvas.getContext('2d');
+  var meter = el('div', 'ss-meter2'); var bar = el('div', 'ss-meter2-bar'); meter.appendChild(bar);
+  vizWrap.appendChild(meter); ui.meterBar = bar; main.appendChild(vizWrap);
+
+  // 高级参数：标签页全放这一屏，不折叠也不用切模式
+  ui.advanced = el('div', 'ss-advanced'); main.appendChild(ui.advanced);
   var tabs = el('div', 'ss-tabs');
-  [['presets', '预设'], ['eq', '均衡'], ['dyn', '动态·激励'], ['space', '混响'], ['stereo', '声场'], ['io', '输入·输出'], ['lib', '生态']].forEach(function (pair) {
+  [['eq', '均衡'], ['dyn', '动态·激励'], ['space', '混响'], ['stereo', '声场'], ['io', '输入·输出'], ['lib', '生态']].forEach(function (pair) {
     var b = el('button', 'ss-tab', pair[1]); b.setAttribute('data-tab', pair[0]);
-    b.addEventListener('click', function (e) { e.preventDefault(); switchTab(pair[0]); toast(pair[1]); });
+    b.addEventListener('click', function (e) { e.preventDefault(); switchTab(pair[0]); });
     tabs.appendChild(b);
   });
   ui.advanced.appendChild(tabs);
   var pages = el('div', 'ss-pages'); ui.advanced.appendChild(pages); ui.pages = pages;
-  buildPresetsPage(pages); buildEQPage(pages); buildDynPage(pages); buildSpacePage(pages);
+  buildEQPage(pages); buildDynPage(pages); buildSpacePage(pages);
   buildStereoPage(pages); buildIOPage(pages); buildLibPage(pages);
 
-  var vizWrap = el('div', 'ss-viz');
-  ui.canvas = el('canvas', 'ss-spectrum'); ui.canvas.width = 320; ui.canvas.height = 56;
-  vizWrap.appendChild(ui.canvas); ui.cctx = ui.canvas.getContext('2d');
-  var meter = el('div', 'ss-meter2'); var bar = el('div', 'ss-meter2-bar'); meter.appendChild(bar);
-  vizWrap.appendChild(meter); ui.meterBar = bar; panel.appendChild(vizWrap);
+  body.appendChild(side); body.appendChild(main); panel.appendChild(body);
   ui.diag = el('div', 'ss-diag', ''); panel.appendChild(ui.diag);
   return panel;
+}
+
+// 左栏预设：全部分类平铺，不横向滚动
+function buildPresetSide(side) {
+  side.innerHTML = '';
+  GROUPS.forEach(function (g) {
+    var items = PRESETS.filter(function (x) { return x.group === g; });
+    if (!items.length) return;
+    side.appendChild(el('div', 'ss-group-label', g));
+    var grid = el('div', 'ss-sgrid');
+    items.forEach(function (it) {
+      var b = el('button', 'ss-item', it.name); b.setAttribute('data-id', it.id);
+      b.addEventListener('click', function (e) { e.preventDefault(); applyPreset(it.id); });
+      grid.appendChild(b);
+    });
+    side.appendChild(grid);
+  });
+  side.appendChild(el('div', 'ss-group-label', '我的预设'));
+  var ug = el('div', 'ss-sgrid'); ug.id = 'ss-user-grid'; side.appendChild(ug);
+  var saveRow = el('div', 'ss-row2');
+  var nameInp = el('input', 'ss-txt'); nameInp.placeholder = '预设名'; nameInp.id = 'ss-preset-name';
+  var saveBtn = el('button', 'ss-btn', '保存');
+  saveBtn.addEventListener('click', function (e) { e.preventDefault(); saveUserPreset(nameInp.value); });
+  saveRow.appendChild(nameInp); saveRow.appendChild(saveBtn); side.appendChild(saveRow);
+  renderUserPresets();
 }
 function switchTab(k) {
   ui.tab = k; state.tab = k; saveState();
@@ -734,17 +759,6 @@ function switchTab(k) {
   if (k === 'eq') { drawEQCurve(); }
 }
 function page(parent, key) { var p = el('div', 'ss-page'); p.setAttribute('data-page', key); p.style.display = 'none'; parent.appendChild(p); return p; }
-// 简单/高级切换：简单只留四个旋钮和精选预设，高级展开全部参数
-function switchView(v) {
-  state.view = (v === 'advanced') ? 'advanced' : 'simple';
-  saveState();
-  if (ui.simple) ui.simple.style.display = state.view === 'simple' ? 'block' : 'none';
-  if (ui.advanced) ui.advanced.style.display = state.view === 'advanced' ? 'block' : 'none';
-  if (ui.advBtn) { ui.advBtn.textContent = state.view === 'advanced' ? '收起' : '高级'; ui.advBtn.classList.toggle('ss-on', state.view === 'advanced'); }
-  if (state.view === 'advanced') { switchTab(state.tab || 'presets'); }
-  else { renderSimple(); }
-  toast(state.view === 'advanced' ? '已展开全部参数' : '已切回简单模式');
-}
 
 
 // ---------------- 预设页 ----------------
@@ -997,26 +1011,11 @@ function copyConfig() {
   if (ui.stat) ui.stat.textContent = '已复制'; toast('已复制', 'ok');
 }
 
-
-// ---------------- 简单视图：四个人话旋钮 + 精选预设 ----------------
+// ---------------- 右栏调音区：四个人话旋钮 + 强度 ----------------
 // 旋钮只驱动独立模块（低音/激励/声场/混响），不碰 EQ，避免和高级参数互相打架。
-var SIMPLE_PRESETS = ['off', 'c_bass', 'c_vocal', 'c_hifi', 'c_3d', 'g_pop', 'g_elec', 's_live', 's_immersive', 's_vinyl'];
-
+// 预设统一放左栏，这里不再重复。
 function buildSimpleView(parent) {
   parent.innerHTML = '';
-  // 精选预设（横向滚动）
-  var row = el('div', 'ss-chips');
-  SIMPLE_PRESETS.forEach(function (id) {
-    var p = findPreset(id);
-    var b = el('button', 'ss-chip', p.name);
-    b.setAttribute('data-id', id);
-    b.addEventListener('click', function (e) { e.preventDefault(); applyPreset(id); });
-    row.appendChild(b);
-  });
-  ui.simpleChips = row;
-  parent.appendChild(row);
-
-  // 四个旋钮
   var knobs = el('div', 'ss-knobs');
   [['bass', '低音'], ['air', '亮度'], ['space', '声场'], ['reverb', '混响']].forEach(function (pair) {
     var k = pair[0], label = pair[1];
@@ -1024,8 +1023,7 @@ function buildSimpleView(parent) {
     wrap.appendChild(el('div', 'ss-knob-v', ''));
     var rng = el('input', 'ss-knob-r'); rng.type = 'range'; rng.min = 0; rng.max = 100; rng.step = 1;
     rng.setAttribute('data-knob', k);
-    var isNeutral = (k === 'space');
-    rng.value = isNeutral ? 50 : 0;
+    rng.value = (k === 'space') ? 50 : 0;
     rng.addEventListener('input', function () {
       setKnob(k, parseFloat(rng.value));
       wrap.querySelector('.ss-knob-v').textContent = rng.value;
@@ -1038,16 +1036,15 @@ function buildSimpleView(parent) {
   ui.knobs = knobs;
   parent.appendChild(knobs);
 
-  // 强度
   var row2 = el('div', 'ss-row2 ss-simple-strength');
-  var lbl = el('label', 'ss-lab', '强度');
+  row2.appendChild(el('label', 'ss-lab', '强度'));
   var srng = el('input', 'ss-rng'); srng.type = 'range'; srng.min = 0; srng.max = 100; srng.step = 1; srng.value = state.intensity;
   var sval = el('span', 'ss-val', state.intensity + '%');
   srng.addEventListener('input', function () {
     state.intensity = parseFloat(srng.value); sval.textContent = srng.value + '%';
     saveState(); applyEQ(); applyExcite(); drawEQCurve();
   });
-  row2.appendChild(lbl); row2.appendChild(srng); row2.appendChild(sval);
+  row2.appendChild(srng); row2.appendChild(sval);
   parent.appendChild(row2);
 
   renderSimple();
@@ -1091,10 +1088,6 @@ function renderSimple() {
     var vEl = ranges[i].parentNode.querySelector('.ss-knob-v');
     if (vEl) vEl.textContent = kv[k];
   }
-  if (ui.simpleChips) {
-    var chips = ui.simpleChips.querySelectorAll('.ss-chip');
-    for (var j = 0; j < chips.length; j++) chips[j].classList.toggle('ss-active', chips[j].getAttribute('data-id') === state.preset);
-  }
 }
 
 
@@ -1131,10 +1124,9 @@ function ensureUI() {
 
   ui.panel = buildPanel(); document.body.appendChild(ui.panel);
   renderBands(); renderUserPresets();
-  switchTab(state.tab || 'presets');
-  if (ui.simple) ui.simple.style.display = state.view === 'simple' ? 'block' : 'none';
-  if (ui.advanced) ui.advanced.style.display = state.view === 'advanced' ? 'block' : 'none';
-  if (ui.advBtn) { ui.advBtn.textContent = state.view === 'advanced' ? '收起' : '高级'; ui.advBtn.classList.toggle('ss-on', state.view === 'advanced'); }
+  switchTab(state.tab === 'presets' ? 'eq' : (state.tab || 'eq'));
+  if (ui.simple) ui.simple.style.display = 'block';
+  if (ui.advanced) ui.advanced.style.display = 'block';
   if (ui.timer) clearInterval(ui.timer);
   ui.timer = setInterval(diagTick, 100);
   updateUI(); drawEQCurve();
