@@ -1052,6 +1052,27 @@ function copyConfig() {
 }
 
 // ---------------- 我的预设 ----------------
+function saveUserPreset(name) {
+  name = (name || '').trim() || ('预设' + (Object.keys(USER_PRESETS).length + 1));
+  USER_PRESETS[name] = { modules: deepClone(state.modules), intensity: state.intensity, ts: Date.now() };
+  saveUserPresets(USER_PRESETS); renderUserPresets();
+  toast('已保存：' + name, 'ok');
+}
+function delUserPreset(name) {
+  delete USER_PRESETS[name]; saveUserPresets(USER_PRESETS); renderUserPresets();
+  toast('已删除：' + name);
+}
+function applyUserPreset(name) {
+  var o = USER_PRESETS[name]; if (!o) return;
+  state.modules = deepClone(o.modules);
+  state.intensity = o.intensity != null ? o.intensity : 100;
+  if (!state.modules.eq || !Array.isArray(state.modules.eq.bands) || state.modules.eq.bands.length !== 10) {
+    state.modules.eq = { bands: defaultBands() };
+  }
+  state.preset = 'user:' + name; state.smart = false; state.ab = null;
+  saveState(); applyAll(); syncBands(); ui.eqDirty = true;
+  toast('已应用：' + name, 'ok');
+}
 function renderUserPresets() {
   var g = ui.panel && ui.panel.querySelector('#ss-user-grid'); if (!g) return;
   g.innerHTML = '';
@@ -1108,7 +1129,7 @@ function eqCanvasPos(b, i) {
   return { x: Math.log(f / 20) / Math.log(1000) * W, y: H / 2 - clamp((b.gain || 0), -15, 15) / 15 * (H / 2 - 10) };
 }
 
-
+﻿
 // ---------------- A/B ----------------
 function toggleAB() {
   if (state.ab) { state.modules = state.ab; state.ab = null; }
@@ -1127,15 +1148,17 @@ function isMainUI() {
   return true;
 }
 function ensureUI() {
-  if (ui.btn && ui.btn.parentNode) return;
+  if (ui.panel && ui.panel.parentNode) return;   // 面板已建就不重复
   if (!isMainUI()) return;
   var host = document.querySelector('.extra-controls');
-  if (!host) return;            // 没有播放栏控件区就不是主界面，绝不往页面空白处放按钮
-  var btn = el('button', 'ss-toggle', '♪'); btn.id = 'ss-toggle'; btn.title = '声境音效 (Alt+Shift+P)';
-  btn.addEventListener('click', function (e) { e.preventDefault(); e.stopPropagation(); togglePanel(); });
-  var ref = host.querySelector('.playback-speed');
-  if (ref) host.insertBefore(btn, ref.nextSibling); else host.appendChild(btn);
-  ui.btn = btn;
+  if (host) {
+    var btn = el('button', 'ss-toggle', '♪'); btn.id = 'ss-toggle'; btn.title = '声境音效 (Alt+Shift+P)';
+    btn.addEventListener('click', function (e) { e.preventDefault(); e.stopPropagation(); togglePanel(); });
+    var ref = host.querySelector('.playback-speed');
+    if (ref) host.insertBefore(btn, ref.nextSibling); else host.appendChild(btn);
+    ui.btn = btn;
+  }
+  // 没有播放栏控件区（某些布局）就不放按钮，但面板照建，快捷键仍能打开
 
   ui.panel = buildPanel();
   document.body.appendChild(ui.panel);
@@ -1320,12 +1343,12 @@ else document.addEventListener('DOMContentLoaded', function () { ensureUI(); });
 setTimeout(function () { warmIR(0); }, 800);
 var _iv = setInterval(function () {
   if (!document.body) return;
-  if (isMainUI() && !ui.btn) ensureUI();
-  if (ui.btn) clearInterval(_iv);
+  if (isMainUI() && !ui.panel) ensureUI();
+  if (ui.panel) clearInterval(_iv);
 }, 400);
 window.addEventListener('hashchange', function () {
   if (!isMainUI()) { if (state.open) { state.open = false; saveState(); if (ui.panel) ui.panel.classList.add('ss-hidden'); stopLoop(); } }
-  else if (!ui.btn) ensureUI();
+  else if (!ui.panel) ensureUI();
 });
 document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && state.open) { e.preventDefault(); togglePanel(); } }, true);
 window.addEventListener('resize', function () { if (state.open) fitPlayerGap(); });
