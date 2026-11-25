@@ -40,6 +40,7 @@ function defaultState() {
     view: 'simple',      // simple=四个旋钮；advanced=全部参数
     tab: 'presets',
     ab: null,
+    knobs: { bass: 0, air: 0 },   // 顶部旋钮：干净低架/高架提升，不做失真
     modules: {
       input:  { autoLoud: false, gain: 0 },
       bass:   { on: false, freq: 90, amount: 0.6 },
@@ -69,6 +70,11 @@ function loadState() {
     state.view = (o.view === 'advanced') ? 'advanced' : 'simple';
     state.tab = (typeof o.tab === 'string') ? o.tab : 'presets';
     state.smart = !!o.smart;
+    if (!state.knobs) state.knobs = { bass: 0, air: 0 };
+    if (o.knobs) {
+      state.knobs.bass = clamp(+(o.knobs.bass || 0), 0, 100);
+      state.knobs.air = clamp(+(o.knobs.air || 0), 0, 100);
+    }
     var base = defaultState();
     for (var k in base.modules) {
       if (state.modules[k] && o.modules[k]) {
@@ -109,7 +115,7 @@ var PRESETS = [
   P({ id: 'c_3d', name: '3D丽音', group: '经典音效', modules: {
     eq: EQ([2, 2, 1, 0, -1, 0, 1, 2, 3, 2]), stereo: { width: 0.35 }, reverb: { ir: 'stage', wet: 0.28 } } }),
   P({ id: 'c_bass', name: '超重低音', group: '经典音效', modules: {
-    eq: EQ([9, 8, 5, 1, -2, -2, -1, 0, 1, 1]), bass: { on: true, freq: 70, amount: 0.7 }, comp: { th: -20, ratio: 4, makeup: 1 } } }),
+    eq: EQ([9, 8, 5, 1, -2, -2, -1, 0, 1, 1]), knobs: { bass: 50 }, comp: { th: -20, ratio: 4, makeup: 1 } } }),
   P({ id: 'c_vocal', name: '纯净人声', group: '经典音效', modules: {
     eq: EQ([-5, -4, -2, 0, 1, 3, 5, 4, 2, 0]), excite: { type: 'tube', drive: 0.25, air: 3 }, stereo: { mid: 2 }, reverb: { ir: 'room', wet: 0.06 } } }),
   P({ id: 'c_hifi', name: 'HiFi现场', group: '经典音效', modules: {
@@ -117,22 +123,22 @@ var PRESETS = [
 
   // 流派
   P({ id: 'g_pop', name: '流行', group: '流派', modules: { eq: EQ([4, 3, 1, 0, 0, 1, 2, 2, 2, 1]), comp: { th: -22, ratio: 3, makeup: 1 } } }),
-  P({ id: 'g_rock', name: '摇滚', group: '流派', modules: { eq: EQ([6, 4, 1, -1, 0, 1, 3, 3, 2, 1]), bass: { on: true, freq: 75, amount: 0.5 }, comp: { th: -18, ratio: 4, makeup: 1 } } }),
-  P({ id: 'g_elec', name: '电子', group: '流派', modules: { eq: EQ([8, 6, 2, -2, -3, -1, 1, 3, 4, 3]), bass: { on: true, freq: 60, amount: 0.45 }, reverb: { ir: 'plate', wet: 0.1 } } }),
+  P({ id: 'g_rock', name: '摇滚', group: '流派', modules: { eq: EQ([6, 4, 1, -1, 0, 1, 3, 3, 2, 1]), knobs: { bass: 30 }, comp: { th: -18, ratio: 4, makeup: 1 } } }),
+  P({ id: 'g_elec', name: '电子', group: '流派', modules: { eq: EQ([8, 6, 2, -2, -3, -1, 1, 3, 4, 3]), knobs: { bass: 25 }, reverb: { ir: 'plate', wet: 0.1 } } }),
   P({ id: 'g_jazz', name: '爵士', group: '流派', modules: { eq: EQ([2, 1, 0, 0, 1, 1, 1, 1, 1, 0]), excite: { type: 'tape', drive: 0.25 } } }),
   P({ id: 'g_class', name: '古典', group: '流派', modules: { eq: EQ([-2, -1, 0, 0, 0, 0, 1, 1, 2, 2]), comp: { th: -28, ratio: 2, makeup: 0 }, reverb: { ir: 'hall', wet: 0.2 } } }),
-  P({ id: 'g_hiphop', name: '嘻哈', group: '流派', modules: { eq: EQ([9, 7, 3, 0, -1, -1, 0, 1, 2, 1]), bass: { on: true, freq: 60, amount: 0.8 }, comp: { th: -16, ratio: 5, makeup: 1 } } }),
+  P({ id: 'g_hiphop', name: '嘻哈', group: '流派', modules: { eq: EQ([9, 7, 3, 0, -1, -1, 0, 1, 2, 1]), knobs: { bass: 45 }, comp: { th: -16, ratio: 5, makeup: 1 } } }),
   P({ id: 'g_metal', name: '金属', group: '流派', modules: { eq: EQ([6, 3, -1, 1, 3, 0, -2, 3, 4, 2]), comp: { th: -16, ratio: 4, makeup: 1 }, excite: { type: 'tube', drive: 0.3 } } }),
   P({ id: 'g_vocal', name: '清唱人声', group: '流派', modules: { eq: EQ([-3, -2, -1, 0, 2, 3, 4, 3, 1, 0]), stereo: { mid: 3 }, reverb: { ir: 'plate', wet: 0.12 } } }),
   P({ id: 'g_lofi', name: 'Lo-Fi', group: '流派', modules: { eq: EQ([3, 2, 1, 1, 0, -1, -2, -4, -6, -8]), excite: { type: 'tape', drive: 0.4 }, reverb: { ir: 'room', wet: 0.1 } } }),
   P({ id: 'g_anime', name: '二次元', group: '流派', modules: { eq: EQ([2, 1, 0, 0, 1, 2, 3, 3, 4, 4]), excite: { type: 'soft', drive: 0.3, air: 4 }, reverb: { ir: 'hall', wet: 0.22 } } }),
 
   // 设备
-  P({ id: 'h_earbud', name: '半入耳耳机', group: '设备', modules: { eq: EQ([6, 4, 2, 1, 0, 0, 1, 2, 3, 4]), bass: { on: true, freq: 80, amount: 0.5 }, excite: { type: 'soft', drive: 0.2, air: 5 } } }),
+  P({ id: 'h_earbud', name: '半入耳耳机', group: '设备', modules: { eq: EQ([6, 4, 2, 1, 0, 0, 1, 2, 3, 4]), knobs: { bass: 28 }, excite: { type: 'soft', drive: 0.2, air: 5 } } }),
   P({ id: 'h_over', name: '头戴开放式', group: '设备', modules: { eq: EQ([1, 1, 0, 0, 0, 0, 0, 1, 1, 1]), stereo: { width: 0.15 } } }),
   P({ id: 'h_inear', name: '入耳监听', group: '设备', modules: { eq: EQ([-1, -1, 0, 0, 0, 0, 0, -1, -1, -2]), comp: { th: -20, ratio: 2.5, makeup: 0 } } }),
-  P({ id: 'h_speaker', name: '小音箱外放', group: '设备', modules: { eq: EQ([6, 5, 3, 1, 0, 0, 1, 2, 3, 3]), bass: { on: true, freq: 90, amount: 0.6 }, stereo: { sideLowcut: 150 } } }),
-  P({ id: 'h_car', name: '车载', group: '设备', modules: { eq: EQ([6, 4, 2, 0, 0, 1, 1, 2, 2, 1]), bass: { on: true, freq: 65, amount: 0.7 }, reverb: { ir: 'stage', wet: 0.3 }, stereo: { width: 0.4 } } }),
+  P({ id: 'h_speaker', name: '小音箱外放', group: '设备', modules: { eq: EQ([6, 5, 3, 1, 0, 0, 1, 2, 3, 3]), knobs: { bass: 30 }, stereo: { sideLowcut: 150 } } }),
+  P({ id: 'h_car', name: '车载', group: '设备', modules: { eq: EQ([6, 4, 2, 0, 0, 1, 1, 2, 2, 1]), knobs: { bass: 40 }, reverb: { ir: 'stage', wet: 0.3 }, stereo: { width: 0.4 } } }),
 
   // 场景（带通/低通用 type 覆盖，效果名副其实）
   P({ id: 's_live', name: '现场演唱会', group: '场景', modules: { eq: EQ([3, 2, 1, 0, 0, 1, 2, 2, 2, 2]), reverb: { ir: 'stage', wet: 0.36 }, stereo: { width: 0.3 } } }),
@@ -152,7 +158,7 @@ var PRESETS = [
   P({ id: 'off', name: '关闭(原音)', group: '基础', modules: {
     eq: EQ([0,0,0,0,0,0,0,0,0,0]), comp: { th: 0, knee: 0, ratio: 1, at: 0.01, rel: 0.25, makeup: 0, limiter: false, ceiling: 0 },
     reverb: { ir: 'none', wet: 0 }, stereo: { width: 0, mid: 0, side: 0, sideLowcut: 0 },
-    bass: { on: false }, excite: { type: 'off', drive: 0, air: 0 }, input: { autoLoud: false, gain: 0 }, output: { gain: 0 } } })
+    knobs: { bass: 0, air: 0 }, bass: { on: false }, excite: { type: 'off', drive: 0, air: 0 }, input: { autoLoud: false, gain: 0 }, output: { gain: 0 } } })
 ];
 var GROUPS = ['基础', '经典音效', '流派', '设备', '场景', '监听'];
 function findPreset(id) {
@@ -265,6 +271,11 @@ function buildChain() {
   N.exciteDry = ctx.createGain(); N.exciteDry.gain.value = 1;
   N.exciteWet = ctx.createGain(); N.exciteWet.gain.value = 0;
   N.air = ctx.createBiquadFilter(); N.air.type = 'highshelf'; N.air.frequency.value = 9000; N.air.gain.value = 0;
+  // 旋钮音色层：低频架 / 高频架 + 等响补偿。干净增益，不做失真，低音和亮度互不掩蔽
+  N.knobHP = ctx.createBiquadFilter(); N.knobHP.type = 'highpass'; N.knobHP.frequency.value = 28; N.knobHP.Q.value = 0.6;
+  N.knobBass = ctx.createBiquadFilter(); N.knobBass.type = 'lowshelf'; N.knobBass.frequency.value = 88; N.knobBass.Q.value = 0.7; N.knobBass.gain.value = 0;
+  N.knobAir = ctx.createBiquadFilter(); N.knobAir.type = 'highshelf'; N.knobAir.frequency.value = 8500; N.knobAir.Q.value = 0.7; N.knobAir.gain.value = 0;
+  N.knobTrim = ctx.createGain(); N.knobTrim.gain.value = 1;
   // 动态：compPre 把信号顶进压缩阈值，comp 后 makeup 补偿（不再是抬峰值）
   N.compPre = ctx.createGain(); N.compPre.gain.value = 1;
   N.comp = ctx.createDynamicsCompressor();
@@ -306,8 +317,10 @@ function buildChain() {
   for (i = 0; i < N.eq.length - 1; i++) N.eq[i].connect(N.eq[i + 1]);
   var eqEnd = N.eq[N.eq.length - 1];
   // 激励：eq -> 干路(1-w) 与 饱和湿路(w) 互补汇入 exciteSum
-  eqEnd.connect(N.exciteDry); N.exciteDry.connect(N.exciteSum);
-  eqEnd.connect(N.exciteDrive); N.exciteDrive.connect(N.exciteWS); N.exciteWS.connect(N.exciteWet); N.exciteWet.connect(N.exciteSum);
+  // 旋钮层接在 10 段 EQ 之后：次声清理 -> 低架 -> 高架 -> 补偿
+  eqEnd.connect(N.knobHP); N.knobHP.connect(N.knobBass); N.knobBass.connect(N.knobAir); N.knobAir.connect(N.knobTrim);
+  N.knobTrim.connect(N.exciteDry); N.exciteDry.connect(N.exciteSum);
+  N.knobTrim.connect(N.exciteDrive); N.exciteDrive.connect(N.exciteWS); N.exciteWS.connect(N.exciteWet); N.exciteWet.connect(N.exciteSum);
   N.exciteSum.connect(N.air); N.air.connect(N.compPre); N.compPre.connect(N.comp); N.comp.connect(N.makeup);
   // 干湿
   N.makeup.connect(N.master);
@@ -471,9 +484,25 @@ function applyEnabled() {
   } catch (e) {}
 }
 function applyAll() {
-  applyInput(); applyBass(); applyEQ(); applyExcite(); applyComp(); applyReverb(); applyStereo(); applyOutput();
+  applyInput(); applyBass(); applyEQ(); applyKnobs(); applyExcite(); applyComp(); applyReverb(); applyStereo(); applyOutput();
   applyEnabled(); syncVolume();
   updateUI(); if (typeof syncBands === 'function') syncBands(); ui.eqDirty = true;
+}
+
+// 顶部旋钮：低音走低架、亮度走高架，都是干净增益，各自独立不互相掩蔽
+function applyKnobs() {
+  if (!nodes || !nodes.knobBass) return;
+  var k = clamp(state.intensity, 0, 100) / 100;
+  var kn = state.knobs || { bass: 0, air: 0 };
+  var bassDb = clamp(kn.bass || 0, 0, 100) / 100 * 10 * k;   // 0..+10dB @88Hz 低架
+  var airDb = clamp(kn.air || 0, 0, 100) / 100 * 9 * k;      // 0..+9dB @8.5kHz 高架
+  try {
+    nodes.knobBass.gain.value = bassDb;
+    nodes.knobAir.gain.value = airDb;
+    // 等响补偿：提升多的部分预先让出余量，限幅器不猛压，整体音量不跳
+    var trimDb = -(bassDb * 0.20 + airDb * 0.12);
+    nodes.knobTrim.gain.value = Math.pow(10, trimDb / 20);
+  } catch (e) {}
 }
 
 // ---------------- 预设应用 ----------------
@@ -488,6 +517,14 @@ function applyPreset(id) {
     }
   }
   if (!Array.isArray(base.modules.eq.bands) || base.modules.eq.bands.length !== 10) base.modules.eq = { bands: defaultBands() };
+  // 预设可带旋钮值；不带就保留用户当前的旋钮，像硬件上的 bass/treble
+  if (!state.knobs) state.knobs = { bass: 0, air: 0 };
+  var pk = p.knobs || (p.modules && p.modules.knobs) || null;
+  if (pk) {
+    state.knobs.bass = clamp(+(pk.bass || 0), 0, 100);
+    state.knobs.air = clamp(+(pk.air || 0), 0, 100);
+  }
+  base.knobs = state.knobs;
   base.intensity = state.intensity; base.open = state.open; base.tab = state.tab; base.enabled = state.enabled;
   state.modules = base.modules;
   state.smart = false; state.ab = null;
@@ -611,9 +648,12 @@ function finishSmart() {
   bands[8].gain += -bH * 3; bands[9].gain += -bH * 2;
   if (bV < -0.1) { bands[6].gain += 2.5 * Math.abs(bV); bands[7].gain += 3 * Math.abs(bV); }
   state.modules.eq = { bands: bands };
-  state.modules.excite = { type: bH < -0.15 ? 'soft' : 'off', drive: 0.3, air: bH < -0.15 ? clamp(-bH * 6, 0, 6) : 0 };
+  state.modules.excite = { type: 'off', drive: 0, air: 0 };
   state.modules.stereo.width = clamp((bL + bH) * 0.15, -0.2, 0.35);
-  state.modules.bass.on = bL < -0.2; state.modules.bass.amount = clamp(-bL * 0.6, 0, 0.6);
+  state.modules.bass = { on: false, freq: 90, amount: 0.6 };
+  if (!state.knobs) state.knobs = { bass: 0, air: 0 };
+  state.knobs.bass = clamp(Math.round(-bL * 40), 0, 55);
+  state.knobs.air = clamp(Math.round(-bH * 35), 0, 45);
   var target = 0.126, meas = a.loud / n;
   if (meas > 0.0001) { state.modules.input.autoLoud = true; state.modules.input.autoGainDb = +clamp(20 * Math.log10(target / meas), -12, 12).toFixed(2); }
   state.preset = 'smart'; state.smart = true;
@@ -636,12 +676,24 @@ function toggleEnabled(force) {
 }
 // 任何调参动作都把总开关打开，避免「关了以后调半天没反应」
 function autoEnable(e) {
-  if (state.enabled) return;
   var t = e.target;
   if (!t || !t.classList) return;
+  // 强度滑块本身不参与兜底，否则拖到 0 会被弹回去
+  if (ui.strength && t === ui.strength) return;
   var hit = t.classList.contains('ss-rng') || t.classList.contains('ss-sel') || t.classList.contains('ss-knob-r') ||
     (t.closest && t.closest('.ss-item[data-id]'));
   if (!hit) return;
+  // 强度被拖到 0 时调参同样没声音，恢复到 100 再动参数
+  if (state.intensity < 5) {
+    state.intensity = 100;
+    if (ui.strength) ui.strength.value = 100;
+    if (ui.strengthV) ui.strengthV.textContent = '100%';
+    applyEQ(); applyKnobs(); applyExcite();
+    toast('强度已恢复到 100%', 'ok');
+    saveState();
+    if (state.enabled) return;
+  }
+  if (state.enabled) return;
   // 只接线和改按钮，不整屏刷新，否则正在拖的滑块会被重置
   state.enabled = true;
   applyEnabled(); saveState();
@@ -825,6 +877,10 @@ function buildHero(hero) {
     rng.setAttribute('data-knob', k);
     rng.setAttribute('data-def', k === 'space' ? 50 : 0);
     rng.value = k === 'space' ? 50 : 0;
+    rng.title = k === 'bass' ? '低频架 88Hz，最多 +10dB，干净提升不碰中高频'
+      : k === 'air' ? '高频架 8.5kHz，最多 +9dB，不碰中低频'
+      : k === 'space' ? '立体声宽度，50 为原始'
+      : '混响湿度';
     rng.addEventListener('input', function () {
       setKnob(k, parseFloat(rng.value)); val.textContent = rng.value;
     });
@@ -845,22 +901,20 @@ function buildHero(hero) {
   var sv = el('span', 'ss-val', state.intensity + '%');
   s.addEventListener('input', function () {
     state.intensity = parseFloat(s.value); sv.textContent = s.value + '%';
-    saveState(); applyEQ(); applyExcite(); ui.eqDirty = true;
+    saveState(); applyEQ(); applyKnobs(); applyExcite(); ui.eqDirty = true;
   });
   sr.appendChild(s); sr.appendChild(sv);
   hero.appendChild(sr);
+  ui.strength = s; ui.strengthV = sv;
   renderSimple();
 }
 
 function setKnob(k, v) {
   var m = state.modules;
-  if (k === 'bass') { m.bass.on = v > 2; m.bass.amount = Math.max(0, Math.min(1, v / 100)); }
-  else if (k === 'air') {
-    m.excite.air = v / 100 * 12;
-    if (v > 2) { if (m.excite.type === 'off') m.excite.type = 'soft'; m.excite.drive = Math.max(m.excite.drive || 0, 0.25); }
-    else m.excite.type = 'off';
-  }
-  else if (k === 'space') { m.stereo.width = (v - 50) / 50 * 0.8; }
+  if (!state.knobs) state.knobs = { bass: 0, air: 0 };
+  if (k === 'bass') { state.knobs.bass = clamp(v, 0, 100); saveState(); applyKnobs(); return; }
+  if (k === 'air') { state.knobs.air = clamp(v, 0, 100); saveState(); applyKnobs(); return; }
+  if (k === 'space') { m.stereo.width = (v - 50) / 50 * 0.8; }
   else if (k === 'reverb') {
     m.reverb.wet = v / 100 * 0.9;
     if (v <= 2) m.reverb.ir = 'none';
@@ -869,10 +923,10 @@ function setKnob(k, v) {
   saveState(); applyAll();
 }
 function knobsFromModules() {
-  var m = state.modules;
+  var m = state.modules, kn = state.knobs || {};
   return {
-    bass: m.bass && m.bass.on ? Math.round((m.bass.amount || 0) * 100) : 0,
-    air: Math.round(Math.min(1, (m.excite && m.excite.air || 0) / 12) * 100),
+    bass: Math.round(clamp(kn.bass || 0, 0, 100)),
+    air: Math.round(clamp(kn.air || 0, 0, 100)),
     space: Math.round(((m.stereo && m.stereo.width || 0) + 1) / 2 * 100),
     reverb: Math.round(Math.min(1, (m.reverb && m.reverb.wet || 0) / 0.9) * 100)
   };
@@ -1003,7 +1057,8 @@ function buildStereoPage(p) {
   g.appendChild(row('宽度', w.s, w.v)); g.appendChild(row('中央M', mid.s, mid.v));
   g.appendChild(row('侧向S', side.s, side.v)); g.appendChild(row('侧向低切', lc.s, lc.v));
 
-  var g2 = group('低音谐波增强'); p.appendChild(g2);
+  var g2 = group('低音谐波增强（进阶）'); p.appendChild(g2);
+  g2.appendChild(el('p', 'ss-hint', '给超低音补谐波，让手机小喇叭也听得到低频。会产生额外谐波，默认关闭；平时用顶部「低音」旋钮就够，那个是干净的。'));
   var bm = state.modules.bass;
   var on = check('开启', bm.on, function (v) { bm.on = v; applyBass(); });
   g2.appendChild(on.wrap);
@@ -1132,17 +1187,23 @@ function bindEQDrag() {
     if (drag < 0) return;
     var q = pt(e), W = ui.eqCanvas.width, H = ui.eqCanvas.height, b = state.modules.eq.bands[drag];
     b.freq = Math.round(clamp(20 * Math.pow(1000, q.x / W), 20, 20000));
-    b.gain = +clamp((H / 2 - q.y) / (H / 2 - 10) * 15, -15, 15).toFixed(1);
+    b.gain = +clamp((H / 2 - q.y) / (H / 2 - 10) * 15 - knobDbAt(b.freq), -15, 15).toFixed(1);
     applyEQ(); ui.eqDirty = true; drawEQCurve();
     var c = ui.bandCtl[drag];
     if (c) { c.gain.value = b.gain; c.gv.textContent = num(b.gain, 1) + 'dB'; c.freq.set(b.freq); }
   });
   ui.eqCanvas.addEventListener('pointerup', function () { if (drag >= 0) { drag = -1; toast('频段已更新'); } });
 }
+// 旋钮低架/高架在某个频率上的增益，用于曲线和圆点对齐
+function knobDbAt(f) {
+  var k = clamp(state.intensity, 0, 100) / 100, kn = state.knobs || {};
+  return (clamp(kn.bass || 0, 0, 100) / 100 * 10 * k) / (1 + Math.pow(f / 88, 2))
+    + (clamp(kn.air || 0, 0, 100) / 100 * 9 * k) / (1 + Math.pow(8500 / f, 2));
+}
 function eqCanvasPos(b, i) {
   var W = ui.eqCanvas.width, H = ui.eqCanvas.height;
   var f = clamp(b.freq || EQ_FREQS[i], 20, 20000);
-  return { x: Math.log(f / 20) / Math.log(1000) * W, y: H / 2 - clamp((b.gain || 0), -15, 15) / 15 * (H / 2 - 10) };
+  return { x: Math.log(f / 20) / Math.log(1000) * W, y: H / 2 - clamp((b.gain || 0) + knobDbAt(f), -15, 15) / 15 * (H / 2 - 10) };
 }
 
 ﻿
@@ -1293,6 +1354,8 @@ function drawEQCurve() {
       else { var ratio = Math.log(f / cf) / Math.LN2; contrib = gain * Math.exp(-(ratio * ratio) / (2 * q * q * 0.32)); }
       sum += contrib;
     }
+    // 顶部旋钮的低架/高架也算进曲线，看到的和听到的一致
+    sum += knobDbAt(f);
     var y = mid - clamp(sum, -16, 16) / 15 * amp;
     if (x === 0) c.moveTo(x, y); else c.lineTo(x, y);
   }
@@ -1321,6 +1384,8 @@ window.__ss = {
   params: function () {
     if (!nodes) return null;
     return { eq: nodes.eq.map(function (f) { return +f.gain.value.toFixed(2); }), eqTypes: nodes.eq.map(function (f) { return f.type; }),
+      excitationWet: +nodes.exciteWet.gain.value.toFixed(3),
+      knobs: { bassDb: +nodes.knobBass.gain.value.toFixed(2), airDb: +nodes.knobAir.gain.value.toFixed(2), trimDb: +(20 * Math.log10(nodes.knobTrim.gain.value)).toFixed(2), bass: state.knobs.bass, air: state.knobs.air },
       bassOn: +nodes.bassGain.gain.value.toFixed(3), exciteWet: +nodes.exciteWet.gain.value.toFixed(3),
       exciteType: state.modules.excite.type, air: +nodes.air.gain.value.toFixed(2),
       comp: { th: nodes.comp.threshold.value, ratio: nodes.comp.ratio.value },
@@ -1332,7 +1397,8 @@ window.__ss = {
   apply: function (id) { applyPreset(id); return window.__ss.diag(); },
   set: function (mod, key, val) { if (!state.modules[mod]) return null; state.modules[mod][key] = val; applyAll(); return window.__ss.params(); },
   setEQ: function (i, obj) { if (!state.modules.eq.bands[i]) return null; for (var k in obj) state.modules.eq.bands[i][k] = obj[k]; applyEQ(); syncBands(); ui.eqDirty = true; drawEQCurve(); return window.__ss.params().eq; },
-  setIntensity: function (v) { state.intensity = clamp(v, 0, 100) | 0; saveState(); applyEQ(); applyExcite(); ui.eqDirty = true; return window.__ss.params().eq; },
+  setIntensity: function (v) { state.intensity = clamp(v, 0, 100) | 0; saveState(); applyEQ(); applyKnobs(); applyExcite(); ui.eqDirty = true; return window.__ss.params().eq; },
+  setKnobs: function (b, a) { if (!state.knobs) state.knobs = { bass: 0, air: 0 }; state.knobs.bass = clamp(b || 0, 0, 100); state.knobs.air = clamp(a || 0, 0, 100); saveState(); applyKnobs(); renderSimple(); return window.__ss.params().knobs; },
   smart: function (on) { toggleSmart(on !== false); return window.__ss.diag(); },
   ab: function () { toggleAB(); return window.__ss.diag(); },
   enabled: function () { toggleEnabled(); return window.__ss.diag(); },
@@ -1348,7 +1414,7 @@ window.__ss = {
   applyUserPreset: function (n) { applyUserPreset(n); return window.__ss.diag(); },
   // 调试/性能分析用（只暴露函数引用，不改状态）
   _fn: { applyPreset: function (id) { applyPreset(id); }, applyEQ: function () { applyEQ(); }, applyBass: function () { applyBass(); },
-    applyExcite: function () { applyExcite(); }, applyComp: function () { applyComp(); }, applyReverb: function () { applyReverb(); },
+    applyExcite: function () { applyExcite(); }, applyKnobs: function () { applyKnobs(); }, applyComp: function () { applyComp(); }, applyReverb: function () { applyReverb(); },
     applyStereo: function () { applyStereo(); }, updateUI: function () { updateUI(); }, syncBands: function () { syncBands(); },
     renderSimple: function () { renderSimple(); }, makeIR: function (ir, s) { return makeIR(IR_DEFS[ir] || IR_DEFS.room, s); },
     bassCurve: function (a) { return bassCurve(a); }, makeCurve: function (k, d) { return makeCurve(k, d); } }
