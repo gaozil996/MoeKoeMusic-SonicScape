@@ -20,20 +20,29 @@ MoeKoe Music 的全屏调音台。Web Audio 实时 DSP，`world:MAIN` 主世界�
 
 ## 能力
 
+**音色（照 ViPER4Android / JamesDSP / EasyEffects 的做法做的）**
+- 低音旋钮是三层，静态 88Hz 低架最多 +8dB，再按音乐低频能量动态补 0-6dB（低频本来足就少补，不会糊），另有一个可选谐波层，默认关。
+- 亮度旋钮是两段，8.5kHz 高架最多 +9dB，加 2.8kHz 轮廓最多 +4dB。
+- 齿音保护常开，5-9kHz 尖峰过强时自动压最多 3.5dB，只压那一下，不动整体。
+- 等响补偿，低音和亮度提升时自动让出 2-3dB 余量，不破音也不削另一端。
+
 **手动**
-- 10 段全参数 EQ：曲线拖点改频率/增益，逐段可调类型/频率/增益/Q。
-- 低音谐波增强（进阶，默认关）：BBE/MaxxBass 式，低通→前置增益→强整形→高通，给小喇叭补超低音；会产生谐波，只在需要时开。
+- 10 段全参数 EQ：曲线用真实 biquad 幅频响应画，拖点改频率/增益，逐段可调类型/频率/增益/Q。
+- 低音谐波增强（进阶，默认关）：missing fundamental 思路，90Hz 低通 → 非对称整形 → 150Hz 带通，补手机小喇叭的感知低频。
 - 激励/饱和：电子管/磁带/柔和，干湿互补 crossfade，空气感高频激励。
 - 压缩/限幅：阈值/拐点/比率/起止/补偿，真峰限幅。
 - 卷积混响：7 种空间 + 自定义 .wav IR 导入，湿度/预延时/尺寸。
 - 立体声场 / M/S：宽度、中央/侧向增益、侧向低频切除。
-- 输入/输出增益、响度自动匹配。
+- 耳机交叉馈送（crossfeed）：照 bs2b 的 Bauer 做法，三档强度 + 混合量，久听不累。
+- 输入/输出增益。
+- 响度自动匹配：ITU-R BS.1770 的 K 加权，目标 -14 LUFS，平滑 1s，不会抽吸。
 
 **自动**
-- 智能一键：采样当前曲目频谱，自动给 EQ 倾斜/激励/宽度/低音/响度。
+- 智能一键：采样当前曲目频谱，自动给 EQ 倾斜/激励/宽度/低音。
 
 **生态**
 - 预设保存、JSON 导出导入、自定义 IR。
+- 耳机校正导入：直接把 autoeq.app 生成的 ParametricEQ.txt 粘进来，自动铺到 10 段，Preamp 落到输入增益。
 
 ## 安装
 
@@ -49,5 +58,6 @@ MoeKoe Music 的全屏调音台。Web Audio 实时 DSP，`world:MAIN` 主世界�
 ## 已知限制
 
 - 混响用合成脉冲响应近似空间感，导入自定义 IR 更真实。
-- 智能/响度是近似估算，非严格 ITU-R BS.1770。
-- 调试句柄 `window.__ss`：`diag() params() apply(id) set(mod,key,val) setEQ(i,obj) setIntensity(v) smart(on) ab() enabled() open() close() tab(k) exportCfg() importCfg(txt)`。
+- 响度是 BS.1770 K 加权加指数平滑的近似，不是实验室级积分表，误差约 ±1LU。
+- EQ 曲线的 lowpass / highpass 段用线性 Q 近似，shelf 段按 Web Audio 的固定斜率（S=1）。
+- 调试句柄 `window.__ss`：`diag() params() apply(id) set(mod,key,val) setEQ(i,obj) setIntensity(v) smart(on) ab() enabled() open() close() tab(k) exportCfg() importCfg(txt) lufs() lr(fa,fb)`。

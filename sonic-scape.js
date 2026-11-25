@@ -49,6 +49,7 @@ function defaultState() {
       comp:   { th: -28, knee: 3, ratio: 6, at: 0.003, rel: 0.15, makeup: 4, limiter: true, ceiling: -1 },
       reverb: { ir: 'room', wet: 0.3, predelay: 18, size: 2.0 },
       stereo: { width: 0.25, mid: 0, side: 0, sideLowcut: 0 },
+      crossfeed: { on: false, preset: 'mid', level: 0.35 },
       output: { gain: 0 }
     },
     smart: false
@@ -204,6 +205,17 @@ function bassCurve(amount) {
   }
   return c;
 }
+// 低音谐波生成曲线：负半波压得比正半波重，产生奇偶混合谐波（全波积分器的近似）
+function harmCurve(amount) {
+  var n = 2048, c = new Float32Array(n), k = 0.35 + clamp(amount, 0, 1) * 0.65;
+  for (var i = 0; i < n; i++) {
+    var x = (i / (n - 1)) * 2 - 1;
+    var y = Math.tanh(x * 2.2);
+    if (x < 0) y *= k;
+    c[i] = y;
+  }
+  return c;
+}
 // 生成卷积 IR：双声道去相关噪声 + 指数衰减。normalize=false 时手动归一化，
 // 保证湿声有明确能量（旧版 normalize=true + 短 IR 导致混响几乎听不见）。
 function makeIR(def, size) {
@@ -250,13 +262,16 @@ function hookProp(el, name, onChange) {
 function buildChain() {
   var N = {}, i;
   N.input = ctx.createGain();                     // 自动响度/输入增益
-  // 低音谐波增强：前置增益顶进曲线 -> 强非线性 -> 高通留谐波 -> 混合（HP 转角下调让 2 次谐波能过）
+  // 低音谐波补充（missing fundamental）：低通取超低频 -> 非对称整形 -> 带通留 100-260Hz 谐波 -> 混入
   N.bassSum = ctx.createGain();
-  N.bassLP = ctx.createBiquadFilter(); N.bassLP.type = 'lowpass'; N.bassLP.frequency.value = 110;
-  N.bassDrive = ctx.createGain(); N.bassDrive.gain.value = 4;
-  N.bassWS = ctx.createWaveShaper(); N.bassWS.curve = bassCurve(0.6); N.bassWS.oversample = '4x';
-  N.bassHP = ctx.createBiquadFilter(); N.bassHP.type = 'highpass'; N.bassHP.frequency.value = 130;
+  N.bassLP = ctx.createBiquadFilter(); N.bassLP.type = 'lowpass'; N.bassLP.frequency.value = 90; N.bassLP.Q.value = 0.7;
+  N.bassDrive = ctx.createGain(); N.bassDrive.gain.value = 2;
+  N.bassWS = ctx.createWaveShaper(); N.bassWS.curve = harmCurve(0.5); N.bassWS.oversample = '4x';
+  N.bassBP = ctx.createBiquadFilter(); N.bassBP.type = 'bandpass'; N.bassBP.frequency.value = 150; N.bassBP.Q.value = 0.8;
   N.bassGain = ctx.createGain(); N.bassGain.gain.value = 0;
+  // 低频能量检测，给动态低音用
+  N.dynAn = ctx.createAnalyser(); N.dynAn.fftSize = 1024; N.dynAn.smoothingTimeConstant = 0.5;
+  N.dynBuf = new Float32Array(N.dynAn.frequencyBinCount);
   // 10 段参数 EQ
   N.eq = EQ_FREQS.map(function (f, idx) {
     var b = ctx.createBiquadFilter();
@@ -270,11 +285,16 @@ function buildChain() {
   N.exciteWS = ctx.createWaveShaper(); N.exciteWS.curve = makeCurve('off', 0); N.exciteWS.oversample = '4x';
   N.exciteDry = ctx.createGain(); N.exciteDry.gain.value = 1;
   N.exciteWet = ctx.createGain(); N.exciteWet.gain.value = 0;
-  N.air = ctx.createBiquadFilter(); N.air.type = 'highshelf'; N.air.frequency.value = 9000; N.air.gain.value = 0;
-  // 旋钮音色层：低频架 / 高频架 + 等响补偿。干净增益，不做失真，低音和亮度互不掩蔽
-  N.knobHP = ctx.createBiquadFilter(); N.knobHP.type = 'highpass'; N.knobHP.frequency.value = 28; N.knobHP.Q.value = 0.6;
-  N.knobBass = ctx.createBiquadFilter(); N.knobBass.type = 'lowshelf'; N.knobBass.frequency.value = 88; N.knobBass.Q.value = 0.7; N.knobBass.gain.value = 0;
-  N.knobAir = ctx.createBiquadFilter(); N.knobAir.type = 'highshelf'; N.knobAir.frequency.value = 8500; N.knobAir.Q.value = 0.7; N.knobAir.gain.value = 0;
+  N.air = ctx.createBiquadFilter(); N.air.type = 'highshelf'; N.air.frequency.value = 8500; N.air.gain.value = 0;
+  // 音色层：24Hz 清理 -> 静态低架 -> 动态低架 -> 高架 -> 中高轮廓 -> 齿音保护 -> 等响补偿
+  N.knobHP = ctx.createBiquadFilter(); N.knobHP.type = 'highpass'; N.knobHP.frequency.value = 24; N.knobHP.Q.value = 0;
+  N.knobBass = ctx.createBiquadFilter(); N.knobBass.type = 'lowshelf'; N.knobBass.frequency.value = 88; N.knobBass.gain.value = 0;
+  N.dynBass = ctx.createBiquadFilter(); N.dynBass.type = 'lowshelf'; N.dynBass.frequency.value = 88; N.dynBass.gain.value = 0;
+  N.knobAir = ctx.createBiquadFilter(); N.knobAir.type = 'highshelf'; N.knobAir.frequency.value = 8500; N.knobAir.gain.value = 0;
+  N.contour = ctx.createBiquadFilter(); N.contour.type = 'peaking'; N.contour.frequency.value = 2800; N.contour.Q.value = 1.2; N.contour.gain.value = 0;
+  N.deess = ctx.createBiquadFilter(); N.deess.type = 'peaking'; N.deess.frequency.value = 6500; N.deess.Q.value = 1.4; N.deess.gain.value = 0;
+  N.deessAn = ctx.createAnalyser(); N.deessAn.fftSize = 1024; N.deessAn.smoothingTimeConstant = 0.6;
+  N.deessBuf = new Float32Array(N.deessAn.frequencyBinCount);
   N.knobTrim = ctx.createGain(); N.knobTrim.gain.value = 1;
   // 动态：compPre 把信号顶进压缩阈值，comp 后 makeup 补偿（不再是抬峰值）
   N.compPre = ctx.createGain(); N.compPre.gain.value = 1;
@@ -284,6 +304,12 @@ function buildChain() {
   N.limiter = ctx.createDynamicsCompressor();
   N.limiter.threshold.value = -1; N.limiter.knee.value = 0; N.limiter.ratio.value = 20;
   N.limiter.attack.value = 0.003; N.limiter.release.value = 0.25;
+  // 左右声道独立监测，用来验证 crossfeed 和 M/S 真的在动
+  N.lrSplit = ctx.createChannelSplitter(2);
+  N.lrAnL = ctx.createAnalyser(); N.lrAnL.fftSize = 2048; N.lrAnL.smoothingTimeConstant = 0.5;
+  N.lrAnR = ctx.createAnalyser(); N.lrAnR.fftSize = 2048; N.lrAnR.smoothingTimeConstant = 0.5;
+  N.lrBufL = new Float32Array(N.lrAnL.frequencyBinCount);
+  N.lrBufR = new Float32Array(N.lrAnR.frequencyBinCount);
   // 混响
   N.revSend = ctx.createGain(); N.revSend.gain.value = 0;
   N.predelay = ctx.createDelay(1.0); N.predelay.delayTime.value = 0.02;
@@ -304,21 +330,38 @@ function buildChain() {
   N.s2l = mono(ctx.createGain()); N.s2l.gain.value = 0.7071;
   N.s2r = mono(ctx.createGain()); N.s2r.gain.value = -0.7071;
   N.outMerge = ctx.createChannelMerger(2);
+  // Crossfeed（bs2b / Bauer 近似）：对侧信号 700Hz 低通后串入，耳机久听不累
+  N.xfSplit = ctx.createChannelSplitter(2);
+  N.xfMerge = ctx.createChannelMerger(2);
+  N.xfLPr = mono(ctx.createBiquadFilter()); N.xfLPr.type = 'lowpass'; N.xfLPr.frequency.value = 700; N.xfLPr.Q.value = 0;
+  N.xfLPl = mono(ctx.createBiquadFilter()); N.xfLPl.type = 'lowpass'; N.xfLPl.frequency.value = 700; N.xfLPl.Q.value = 0;
+  N.xfGl = ctx.createGain(); N.xfGl.gain.value = 0;     // R -> L
+  N.xfGr = ctx.createGain(); N.xfGr.gain.value = 0;     // L -> R
+  N.xfDryL = ctx.createGain(); N.xfDryL.gain.value = 1;
+  N.xfDryR = ctx.createGain(); N.xfDryR.gain.value = 1;
   // 输出：output=手动增益, vol=系统音量, enabled=总开关旁路
   N.output = ctx.createGain();
   N.vol = ctx.createGain();
   N.analyser = ctx.createAnalyser(); N.analyser.fftSize = 2048; N.analyser.smoothingTimeConstant = 0.8;
+  // K 加权支路（ITU-R BS.1770），只做分析不改声音，用来算 LUFS
+  N.kwShelf = ctx.createBiquadFilter(); N.kwShelf.type = 'highshelf'; N.kwShelf.frequency.value = 1682; N.kwShelf.gain.value = 3.9998;
+  N.kwHP = ctx.createBiquadFilter(); N.kwHP.type = 'highpass'; N.kwHP.frequency.value = 38.135; N.kwHP.Q.value = -6.02;
+  N.kwAn = ctx.createAnalyser(); N.kwAn.fftSize = 2048; N.kwAn.smoothingTimeConstant = 0;
+  N.kwBuf = new Float32Array(N.kwAn.fftSize);
 
   // ---- 连线 ----
   N.input.connect(N.bassSum);
+  N.input.connect(N.kwShelf); N.kwShelf.connect(N.kwHP); N.kwHP.connect(N.kwAn);
   N.input.connect(N.bassLP); N.bassLP.connect(N.bassDrive); N.bassDrive.connect(N.bassWS);
-  N.bassWS.connect(N.bassHP); N.bassHP.connect(N.bassGain); N.bassGain.connect(N.bassSum);
+  N.bassWS.connect(N.bassBP); N.bassBP.connect(N.bassGain); N.bassGain.connect(N.bassSum);
+  N.bassSum.connect(N.dynAn);
   N.bassSum.connect(N.eq[0]);
   for (i = 0; i < N.eq.length - 1; i++) N.eq[i].connect(N.eq[i + 1]);
   var eqEnd = N.eq[N.eq.length - 1];
-  // 激励：eq -> 干路(1-w) 与 饱和湿路(w) 互补汇入 exciteSum
-  // 旋钮层接在 10 段 EQ 之后：次声清理 -> 低架 -> 高架 -> 补偿
-  eqEnd.connect(N.knobHP); N.knobHP.connect(N.knobBass); N.knobBass.connect(N.knobAir); N.knobAir.connect(N.knobTrim);
+  // 音色层：清理 -> 静态低架 -> 动态低架 -> 高架 -> 中高轮廓 -> 齿音保护 -> 补偿
+  eqEnd.connect(N.knobHP); N.knobHP.connect(N.knobBass); N.knobBass.connect(N.dynBass); N.dynBass.connect(N.knobAir);
+  N.knobAir.connect(N.contour); N.contour.connect(N.deess); N.deess.connect(N.knobTrim);
+  N.contour.connect(N.deessAn);  // 激励：干路(1-w) 与 饱和湿路(w) 互补汇入 exciteSum
   N.knobTrim.connect(N.exciteDry); N.exciteDry.connect(N.exciteSum);
   N.knobTrim.connect(N.exciteDrive); N.exciteDrive.connect(N.exciteWS); N.exciteWS.connect(N.exciteWet); N.exciteWet.connect(N.exciteSum);
   N.exciteSum.connect(N.air); N.air.connect(N.compPre); N.compPre.connect(N.comp); N.comp.connect(N.makeup);
@@ -337,9 +380,17 @@ function buildChain() {
   N.sideHP.connect(N.s2l); N.sideHP.connect(N.s2r);
   N.m2l.connect(N.outMerge, 0, 0); N.s2l.connect(N.outMerge, 0, 0);
   N.m2r.connect(N.outMerge, 0, 1); N.s2r.connect(N.outMerge, 0, 1);
+  // Crossfeed：直通 + 对侧低通串入
+  N.outMerge.connect(N.xfSplit);
+  N.xfSplit.connect(N.xfDryL, 0); N.xfDryL.connect(N.xfMerge, 0, 0);
+  N.xfSplit.connect(N.xfDryR, 1); N.xfDryR.connect(N.xfMerge, 0, 1);
+  N.xfSplit.connect(N.xfLPl, 1); N.xfLPl.connect(N.xfGl); N.xfGl.connect(N.xfMerge, 0, 0);
+  N.xfSplit.connect(N.xfLPr, 0); N.xfLPr.connect(N.xfGr); N.xfGr.connect(N.xfMerge, 0, 1);
   // 输出
-  N.outMerge.connect(N.output); N.output.connect(N.vol); N.vol.connect(N.limiter);
+  N.xfMerge.connect(N.output); N.output.connect(N.vol); N.vol.connect(N.limiter);
   N.limiter.connect(N.analyser); N.analyser.connect(ctx.destination);
+  N.limiter.connect(N.lrSplit);
+  N.lrSplit.connect(N.lrAnL, 0); N.lrSplit.connect(N.lrAnR, 1);
 
   nodes = N;
   rmsBuf = new Float32Array(N.analyser.fftSize);
@@ -355,22 +406,46 @@ function syncVolume() {
 
 
 // ---------------- 模块应用 ----------------
+var kwMs = 0, autoDb = 0;
 function applyInput() {
   if (!nodes) return;
   var m = state.modules.input;
   var g = clamp(m.gain || 0, -24, 24);
-  var extra = (m.autoLoud && typeof m.autoGainDb === 'number') ? clamp(m.autoGainDb, -12, 12) : 0;
-  try { nodes.input.gain.value = dbToGain(g + extra); } catch (e) {}
+  var extra = m.autoLoud ? clamp(autoDb, -12, 12) : ((m.autoLoud && typeof m.autoGainDb === 'number') ? clamp(m.autoGainDb, -12, 12) : 0);
+  try { nodes.input.gain.setTargetAtTime(dbToGain(g + extra), ctx.currentTime, 0.05); } catch (e) {}
+  // K 加权响度，目标 -14 LUFS，替代原来的简单 RMS
+}
+function lufsTick() {
+  if (!nodes || !nodes.kwAn) return;
+  if (!state.modules.input.autoLoud) { autoDb = 0; return; }
+  var b = nodes.kwBuf;
+  try { nodes.kwAn.getFloatTimeDomainData(b); } catch (e) { return; }
+  var s = 0;
+  for (var i = 0; i < b.length; i++) s += b[i] * b[i];
+  var msNow = s / b.length;
+  kwMs = kwMs > 0 ? kwMs * 0.92 + msNow * 0.08 : msNow;
+  if (!(kwMs > 1e-9)) return;
+  var lufs = -0.691 + 10 * Math.log10(kwMs);
+  // 减掉已应用的补偿，得到补偿前的节目响度，否则会形成闭环只补偿一半
+  var raw = lufs - autoDb;
+  var want = clamp(-14 - raw, -12, 12);
+  autoDb += (want - autoDb) * 0.12;
+  try { nodes.input.gain.setTargetAtTime(dbToGain(clamp((state.modules.input.gain || 0) + autoDb, -30, 24)), ctx.currentTime, 0.25); } catch (e) {}
+}
+function currentLufs() {
+  if (!(kwMs > 1e-9)) return null;
+  return +(-0.691 + 10 * Math.log10(kwMs)).toFixed(1);
 }
 function applyBass() {
   if (!nodes) return;
   var m = state.modules.bass, amt = clamp(m.amount || 0, 0, 1);
   try {
-    nodes.bassLP.frequency.value = clamp(m.freq || 90, 40, 220);
-    nodes.bassHP.frequency.value = clamp((m.freq || 90) * 1.5, 90, 400);
-    nodes.bassDrive.gain.value = 3 + amt * 5;                 // 顶进曲线弯曲区
-    nodes.bassWS.curve = bassCurve(amt);                      // 谐波量真正改曲线
-    nodes.bassGain.gain.value = m.on ? (0.35 + amt * 0.9) : 0; // 谐波混合量，明显可闻
+    nodes.bassLP.frequency.setTargetAtTime(clamp(m.freq || 90, 40, 160), ctx.currentTime, 0.05);
+    nodes.bassBP.frequency.setTargetAtTime(clamp((m.freq || 90) * 1.7, 90, 400), ctx.currentTime, 0.05);
+    nodes.bassDrive.gain.setTargetAtTime(1.2 + amt * 2.2, ctx.currentTime, 0.05);
+    if (nodes.bassWS.__amt !== amt) { nodes.bassWS.curve = harmCurve(amt); nodes.bassWS.__amt = amt; }
+    // 谐波最多混入 30%，量小才不脏
+    nodes.bassGain.gain.setTargetAtTime(m.on ? amt * 0.3 : 0, ctx.currentTime, 0.05);
   } catch (e) {}
 }
 function applyEQ() {
@@ -470,6 +545,7 @@ function applyOutput() {
 var enabledApplied = null;
 function applyEnabled() {
   if (!nodes || !claimed) return;
+  syncDyn();
   if (enabledApplied === state.enabled) return;   // 幂等，状态没变不重连
   var on = state.enabled;
   try {
@@ -484,24 +560,98 @@ function applyEnabled() {
   } catch (e) {}
 }
 function applyAll() {
-  applyInput(); applyBass(); applyEQ(); applyKnobs(); applyExcite(); applyComp(); applyReverb(); applyStereo(); applyOutput();
+  applyInput(); applyBass(); applyEQ(); applyKnobs(); applyExcite(); applyComp(); applyReverb(); applyStereo(); applyCrossfeed(); applyOutput();
   applyEnabled(); syncVolume();
   updateUI(); if (typeof syncBands === 'function') syncBands(); if (typeof syncCtrls === 'function') syncCtrls(); ui.eqDirty = true;
 }
 
-// 顶部旋钮：低音走低架、亮度走高架，都是干净增益，各自独立不互相掩蔽
+// 顶部旋钮：低音 = 静态低架 + 动态低架 + 可选谐波；亮度 = 高架 + 中高轮廓
 function applyKnobs() {
   if (!nodes || !nodes.knobBass) return;
   var k = clamp(state.intensity, 0, 100) / 100;
   var kn = state.knobs || { bass: 0, air: 0 };
-  var bassDb = clamp(kn.bass || 0, 0, 100) / 100 * 10 * k;   // 0..+10dB @88Hz 低架
+  var bassDb = clamp(kn.bass || 0, 0, 100) / 100 * 8 * k;    // 0..+8dB @88Hz 静态低架
   var airDb = clamp(kn.air || 0, 0, 100) / 100 * 9 * k;      // 0..+9dB @8.5kHz 高架
+  var contourDb = clamp(kn.air || 0, 0, 100) / 100 * 4 * k;  // 0..+4dB @2.8kHz 轮廓
   try {
-    nodes.knobBass.gain.value = bassDb;
-    nodes.knobAir.gain.value = airDb;
+    nodes.knobBass.gain.setTargetAtTime(bassDb, ctx.currentTime, 0.03);
+    nodes.knobAir.gain.setTargetAtTime(airDb, ctx.currentTime, 0.03);
+    nodes.contour.gain.setTargetAtTime(contourDb, ctx.currentTime, 0.03);
     // 等响补偿：提升多的部分预先让出余量，限幅器不猛压，整体音量不跳
-    var trimDb = -(bassDb * 0.20 + airDb * 0.12);
-    nodes.knobTrim.gain.value = Math.pow(10, trimDb / 20);
+    var trimDb = -(bassDb * 0.20 + airDb * 0.12 + contourDb * 0.10);
+    nodes.knobTrim.gain.setTargetAtTime(Math.pow(10, trimDb / 20), ctx.currentTime, 0.03);
+  } catch (e) {}
+  dynWant = bassDb * 0.75;   // 动态低音最多再补 75% 的静态量
+  syncDyn();
+  applyDeess();
+}
+
+// ---------------- 动态低音 + 齿音保护 ----------------
+var dynTimer = null, dynCur = 0, dynWant = 0;
+function syncDyn() {
+  if (state.enabled && nodes && ctx) {
+    if (!dynTimer) dynTimer = setInterval(dynTick, 60);
+  } else {
+    if (dynTimer) { clearInterval(dynTimer); dynTimer = null; }
+    if (nodes && nodes.dynBass && ctx) { try { nodes.dynBass.gain.setTargetAtTime(0, ctx.currentTime, 0.08); } catch (e) {} }
+    if (nodes && nodes.deess && ctx) { try { nodes.deess.gain.setTargetAtTime(0, ctx.currentTime, 0.08); } catch (e) {} }
+    dynCur = 0;
+  }
+}
+function bandAvgDb(buf, fLow, fHigh, an) {
+  try {
+    var binHz = ctx.sampleRate / an.fftSize;
+    var a = Math.max(1, Math.floor(fLow / binHz)), b = Math.min(buf.length - 1, Math.ceil(fHigh / binHz));
+    var s = 0, n = 0;
+    for (var i = a; i <= b; i++) { var v = buf[i]; if (isFinite(v)) { s += v; n++; } }
+    return n ? s / n : -140;
+  } catch (e) { return -140; }
+}
+function dynTick() {
+  if (!nodes || !ctx || !nodes.dynAn) return;
+  var db = -140;
+  try { nodes.dynAn.getFloatFrequencyData(nodes.dynBuf); db = bandAvgDb(nodes.dynBuf, 40, 160, nodes.dynAn); } catch (e) { return; }
+  // 低频弱就多补，低频本身很足时只补 35%，避免糊
+  var t = clamp((db + 58) / 38, 0, 1);
+  var target = dynWant * (0.35 + 0.65 * (1 - t));
+  var coef = target > dynCur ? 0.28 : 0.07;   // attack 约 120ms，release 约 500ms
+  dynCur += (target - dynCur) * coef;
+  try { nodes.dynBass.gain.setTargetAtTime(dynCur, ctx.currentTime, 0.05); } catch (e) {}
+  applyDeess();
+  lufsTick();
+}
+function bandMaxDb(buf, fLow, fHigh, an) {
+  try {
+    var binHz = ctx.sampleRate / an.fftSize;
+    var a = Math.max(1, Math.floor(fLow / binHz)), b = Math.min(buf.length - 1, Math.ceil(fHigh / binHz));
+    var peak = -140;
+    for (var i = a; i <= b; i++) { var v = buf[i]; if (isFinite(v) && v > peak) peak = v; }
+    return peak;
+  } catch (e) { return -140; }
+}
+function applyDeess() {
+  if (!nodes || !nodes.deess) return;
+  if (!dynTimer) { try { nodes.deess.gain.setTargetAtTime(0, ctx.currentTime, 0.05); } catch (e) {} return; }
+  var db = -140;
+  try { nodes.deessAn.getFloatFrequencyData(nodes.deessBuf); db = bandMaxDb(nodes.deessBuf, 5000, 9000, nodes.deessAn); } catch (e) {}
+  // 齿音是尖峰，看峰值。超过 -42dB 开始压，最多 -3.5dB
+  var over = clamp((db + 42) / 20, 0, 1);
+  try { nodes.deess.gain.setTargetAtTime(-3.5 * over, ctx.currentTime, 0.06); } catch (e) {}
+}
+
+function applyCrossfeed() {
+  if (!nodes || !nodes.xfGl) return;
+  var m = state.modules.crossfeed || { on: false, preset: 'mid', level: 0.35 };
+  var pres = { low: { fc: 360, feed: 0.398 }, mid: { fc: 500, feed: 0.46 }, high: { fc: 700, feed: 0.53 } }[m.preset] || { fc: 500, feed: 0.46 };
+  var lv = clamp(m.level == null ? 0.35 : m.level, 0, 1);
+  try {
+    nodes.xfLPl.frequency.setTargetAtTime(pres.fc, ctx.currentTime, 0.04);
+    nodes.xfLPr.frequency.setTargetAtTime(pres.fc, ctx.currentTime, 0.04);
+    nodes.xfGl.gain.setTargetAtTime(m.on ? pres.feed * lv : 0, ctx.currentTime, 0.04);
+    nodes.xfGr.gain.setTargetAtTime(m.on ? pres.feed * lv : 0, ctx.currentTime, 0.04);
+    var dry = m.on ? (1 - 0.15 * lv) : 1;
+    nodes.xfDryL.gain.setTargetAtTime(dry, ctx.currentTime, 0.04);
+    nodes.xfDryR.gain.setTargetAtTime(dry, ctx.currentTime, 0.04);
   } catch (e) {}
 }
 
@@ -885,8 +1035,8 @@ function buildHero(hero) {
     rng.setAttribute('data-knob', k);
     rng.setAttribute('data-def', k === 'space' ? 50 : 0);
     rng.value = k === 'space' ? 50 : 0;
-    rng.title = k === 'bass' ? '低频架 88Hz，最多 +10dB，干净提升不碰中高频'
-      : k === 'air' ? '高频架 8.5kHz，最多 +9dB，不碰中低频'
+    rng.title = k === 'bass' ? '88Hz 低架最多 +8dB，再按音乐低频自动补 0-6dB'
+      : k === 'air' ? '8.5kHz 高架 + 2.8kHz 轮廓，最多 +13dB'
       : k === 'space' ? '立体声宽度，50 为原始'
       : '混响湿度';
     rng.addEventListener('input', function () {
@@ -1107,12 +1257,25 @@ function buildStereoPage(p) {
   g2.appendChild(row('中心频率', f.s, f.v)); g2.appendChild(row('谐波量', am.s, am.v));
   bindCtl(function () { return state.modules.bass.freq; }, f.set);
   bindCtl(function () { return state.modules.bass.amount; }, am.set);
+
+  var g3 = group('耳机交叉馈送（crossfeed）'); p.appendChild(g3);
+  g3.appendChild(el('p', 'ss-hint', '把对侧声音串一点过来，模拟两隻音箱的位置，戴耳机久听不累。'));
+  var cfOn = check('开启', state.modules.crossfeed.on, function (v) { state.modules.crossfeed.on = v; applyCrossfeed(); });
+  g3.appendChild(cfOn.wrap);
+  bindCtl(function () { return !!state.modules.crossfeed.on; }, cfOn.set);
+  var cfSel = select([{ value: 'low', label: '弱' }, { value: 'mid', label: '中' }, { value: 'high', label: '强' }],
+    state.modules.crossfeed.preset, function (v) { state.modules.crossfeed.preset = v; applyCrossfeed(); });
+  g3.appendChild(row('强度档', cfSel));
+  bindCtl(function () { return state.modules.crossfeed.preset; }, function (x) { cfSel.value = x; });
+  var cfLv = slider(0, 1, 0.05, state.modules.crossfeed.level, function (v) { state.modules.crossfeed.level = v; applyCrossfeed(); }, function (x) { return Math.round(x * 100) + '%'; });
+  g3.appendChild(row('混合量', cfLv.s, cfLv.v));
+  bindCtl(function () { return state.modules.crossfeed.level; }, cfLv.set);
 }
 
 function buildIOPage(p) {
   var g = group('输入'); p.appendChild(g);
-  var c = check('响度自动匹配（配合智能）', state.modules.input.autoLoud, function (v) {
-    state.modules.input.autoLoud = v; if (!v) state.modules.input.autoGainDb = 0; applyInput();
+  var c = check('响度自动匹配（EBU R128）', state.modules.input.autoLoud, function (v) {
+    state.modules.input.autoLoud = v; if (!v) { state.modules.input.autoGainDb = 0; autoDb = 0; } applyInput();
   });
   g.appendChild(c.wrap);
   bindCtl(function () { return !!state.modules.input.autoLoud; }, c.set);
@@ -1137,6 +1300,55 @@ function buildLibPage(p) {
   r.appendChild(exp); r.appendChild(imp); r.appendChild(cp); g.appendChild(r);
   ui.codeBox = el('textarea', 'ss-code'); ui.codeBox.placeholder = 'JSON'; g.appendChild(ui.codeBox);
   ui.stat = el('div', 'ss-stat', ''); g.appendChild(ui.stat);
+
+  var g2 = group('耳机校正（AutoEQ）'); p.appendChild(g2);
+  g2.appendChild(el('p', 'ss-hint', '把 autoeq.app 生成的 ParametricEQ.txt 内容粘进来，自动铺到 10 段，Preamp 落到输入增益。'));
+  ui.aeqBox = el('textarea', 'ss-code');
+  ui.aeqBox.placeholder = 'Preamp: -6.8 dB\nFilter 1: ON PK Fc 105 Hz Gain 6.9 dB Q 3.000';
+  g2.appendChild(ui.aeqBox);
+  var r2 = el('div', 'ss-row2');
+  var imp2 = el('button', 'ss-btn', '导入 AutoEQ');
+  imp2.addEventListener('click', function (e) { e.preventDefault(); importAutoEQ(); });
+  var clr = el('button', 'ss-btn', '清空校正');
+  clr.addEventListener('click', function (e) {
+    e.preventDefault();
+    state.modules.eq = { bands: defaultBands() };
+    state.modules.input.gain = 0; state.preset = 'off';
+    saveState(); applyAll(); ui.eqDirty = true; toast('校已清空', 'ok');
+  });
+  r2.appendChild(imp2); r2.appendChild(clr); g2.appendChild(r2);
+  ui.aeqStat = el('div', 'ss-stat', ''); g2.appendChild(ui.aeqStat);
+}
+
+// AutoEQ/EqualizerAPO 的 ParametricEQ 文本，Preamp + PK/LSC/HSC
+function parseAutoEQ(txt) {
+  var preamp = 0, out = [];
+  String(txt || '').split(/\r?\n/).forEach(function (line) {
+    var m = line.match(/Preamp\s*[:：]\s*(-?[\d.]+)\s*dB/i);
+    if (m) preamp = parseFloat(m[1]);
+    var f = line.match(/Filter\s+\d+\s*[:：]\s*ON\s+(PK|PEQ|LS|LSC|HS|HSC)\s+Fc\s+([\d.]+)\s*Hz\s+Gain\s+(-?[\d.]+)\s*dB(?:\s+Q\s+([\d.]+))?/i);
+    if (f) {
+      var t = /PK|PEQ/i.test(f[1]) ? 'peaking' : /LS/i.test(f[1]) ? 'lowshelf' : 'highshelf';
+      out.push({ type: t, freq: +f[2], gain: +f[3], q: f[4] ? +f[4] : 1 });
+    }
+  });
+  return { preamp: preamp, filters: out };
+}
+function importAutoEQ() {
+  var r = parseAutoEQ(ui.aeqBox ? ui.aeqBox.value : '');
+  if (!r.filters.length) { toast('没解析到 Filter 行', 'off'); return; }
+  var bands = defaultBands();
+  for (var i = 0; i < 10; i++) {
+    var f = r.filters[i];
+    if (f) bands[i] = { type: f.type, freq: clamp(f.freq, 20, 20000), gain: clamp(f.gain, -15, 15), q: clamp(f.q, 0.1, 10) };
+    else bands[i] = { type: 'peaking', freq: EQ_FREQS[i], gain: 0, q: 1 };
+  }
+  state.modules.eq = { bands: bands };
+  state.modules.input.gain = clamp(r.preamp, -24, 24);
+  state.preset = 'imported'; state.smart = false; state.ab = null;
+  saveState(); applyAll(); ui.eqDirty = true;
+  if (ui.aeqStat) ui.aeqStat.textContent = '已导入 ' + r.filters.length + ' 段，Preamp ' + r.preamp + ' dB';
+  toast('AutoEQ 已导入 ' + r.filters.length + ' 段', 'ok');
 }
 function currentConfig() { return { v: 1, name: state.preset, intensity: state.intensity, modules: state.modules }; }
 function exportPreset() {
@@ -1376,6 +1588,54 @@ function drawViz() {
   if (ui.meterBar) ui.meterBar.style.width = Math.min(100, rms * 260).toFixed(0) + '%';
 }
 
+// RBJ cookbook 系数，用于把 EQ 曲线画准（Web Audio shelf 固定 S=1，Q 不参与）
+function eqCoefs(b, fs) {
+  var type = b.type || 'peaking';
+  var f0 = clamp(b.freq || 1000, 10, fs * 0.49);
+  var gainDb = b.gain || 0;
+  var Q = clamp(b.q || 1, 0.1, 20);
+  var A = Math.pow(10, gainDb / 40);
+  var w0 = 2 * Math.PI * f0 / fs, cw = Math.cos(w0), sw = Math.sin(w0);
+  var alpha, b0, b1, b2, a0, a1, a2;
+  if (type === 'lowshelf' || type === 'highshelf') {
+    alpha = sw / 2 * Math.SQRT2;
+    var sA = Math.sqrt(A);
+    if (type === 'lowshelf') {
+      b0 = A * ((A + 1) - (A - 1) * cw + 2 * sA * alpha);
+      b1 = 2 * A * ((A - 1) - (A + 1) * cw);
+      b2 = A * ((A + 1) - (A - 1) * cw - 2 * sA * alpha);
+      a0 = (A + 1) + (A - 1) * cw + 2 * sA * alpha;
+      a1 = -2 * ((A - 1) + (A + 1) * cw);
+      a2 = (A + 1) + (A - 1) * cw - 2 * sA * alpha;
+    } else {
+      b0 = A * ((A + 1) + (A - 1) * cw + 2 * sA * alpha);
+      b1 = -2 * A * ((A - 1) + (A + 1) * cw);
+      b2 = A * ((A + 1) + (A - 1) * cw - 2 * sA * alpha);
+      a0 = (A + 1) - (A - 1) * cw + 2 * sA * alpha;
+      a1 = 2 * ((A - 1) - (A + 1) * cw);
+      a2 = (A + 1) - (A - 1) * cw - 2 * sA * alpha;
+    }
+  } else if (type === 'lowpass' || type === 'highpass') {
+    alpha = sw / (2 * Q);
+    if (type === 'lowpass') { b0 = (1 - cw) / 2; b1 = 1 - cw; b2 = b0; }
+    else { b0 = (1 + cw) / 2; b1 = -(1 + cw); b2 = b0; }
+    a0 = 1 + alpha; a1 = -2 * cw; a2 = 1 - alpha;
+  } else {
+    alpha = sw / (2 * Q);
+    b0 = 1 + alpha * A; b1 = -2 * cw; b2 = 1 - alpha * A;
+    a0 = 1 + alpha / A; a1 = -2 * cw; a2 = 1 - alpha / A;
+  }
+  return { b0: b0 / a0, b1: b1 / a0, b2: b2 / a0, a1: a1 / a0, a2: a2 / a0 };
+}
+function coefMagDb(cf, f, fs) {
+  var w = 2 * Math.PI * f / fs, c1 = Math.cos(w), s1 = Math.sin(w), c2 = Math.cos(2 * w), s2 = Math.sin(2 * w);
+  var nr = cf.b0 + cf.b1 * c1 + cf.b2 * c2, ni = -(cf.b1 * s1 + cf.b2 * s2);
+  var dr = 1 + cf.a1 * c1 + cf.a2 * c2, di = -(cf.a1 * s1 + cf.a2 * s2);
+  var num = nr * nr + ni * ni, den = dr * dr + di * di;
+  if (!(den > 1e-14)) return 0;
+  return 10 * Math.log10(Math.max(1e-12, num / den));
+}
+
 function drawEQCurve() {
   if (!ui.eqc || !ui.eqCanvas) return;
   if (!state.modules.eq || !Array.isArray(state.modules.eq.bands)) state.modules.eq = { bands: defaultBands() };
@@ -1385,20 +1645,16 @@ function drawEQCurve() {
   c.strokeStyle = 'rgba(255,255,255,.06)'; c.lineWidth = 1;
   for (var g = -10; g <= 10; g += 5) { var gy = mid - g / 15 * amp; c.beginPath(); c.moveTo(0, gy); c.lineTo(W, gy); c.stroke(); }
   for (var fx = 100; fx <= 10000; fx *= 10) { var gx = Math.log(fx / 20) / Math.log(1000) * W; c.beginPath(); c.moveTo(gx, 0); c.lineTo(gx, H); c.stroke(); }
-  // 曲线
+  // 曲线，用真实 biquad 幅频响应
   var bands = state.modules.eq.bands, k = clamp(state.intensity, 0, 100) / 100;
+  var fs = (ctx && ctx.sampleRate) || 44100;
+  var coefs = bands.map(function (b, i) {
+    return eqCoefs({ type: b.type, freq: b.freq || EQ_FREQS[i], gain: (b.gain || 0) * k, q: b.q || 1 }, fs);
+  });
   c.strokeStyle = '#5eead4'; c.lineWidth = 2.5; c.beginPath();
   for (var x = 0; x <= W; x += 2) {
     var f = 20 * Math.pow(1000, x / W), sum = 0;
-    for (var i = 0; i < bands.length; i++) {
-      var b = bands[i], gain = (b.gain || 0) * k, cf = clamp(b.freq || EQ_FREQS[i], 20, 20000), q = clamp(b.q || 1, 0.1, 10), type = b.type || 'peaking', contrib;
-      if (type === 'lowshelf') contrib = gain / (1 + Math.pow(f / cf, 2));
-      else if (type === 'highshelf') contrib = gain / (1 + Math.pow(cf / f, 2));
-      else if (type === 'lowpass') contrib = -15 / (1 + Math.pow(f / cf, -4));
-      else if (type === 'highpass') contrib = -15 / (1 + Math.pow(f / cf, 4));
-      else { var ratio = Math.log(f / cf) / Math.LN2; contrib = gain * Math.exp(-(ratio * ratio) / (2 * q * q * 0.32)); }
-      sum += contrib;
-    }
+    for (var i = 0; i < coefs.length; i++) sum += coefMagDb(coefs[i], f, fs);
     // 顶部旋钮的低架/高架也算进曲线，看到的和听到的一致
     sum += knobDbAt(f);
     var y = mid - clamp(sum, -16, 16) / 15 * amp;
@@ -1430,12 +1686,13 @@ window.__ss = {
     if (!nodes) return null;
     return { eq: nodes.eq.map(function (f) { return +f.gain.value.toFixed(2); }), eqTypes: nodes.eq.map(function (f) { return f.type; }),
       excitationWet: +nodes.exciteWet.gain.value.toFixed(3),
-      knobs: { bassDb: +nodes.knobBass.gain.value.toFixed(2), airDb: +nodes.knobAir.gain.value.toFixed(2), trimDb: +(20 * Math.log10(nodes.knobTrim.gain.value)).toFixed(2), bass: state.knobs.bass, air: state.knobs.air },
+      knobs: { bassDb: +nodes.knobBass.gain.value.toFixed(2), dynDb: +nodes.dynBass.gain.value.toFixed(2), airDb: +nodes.knobAir.gain.value.toFixed(2), contourDb: +nodes.contour.gain.value.toFixed(2), deessDb: +nodes.deess.gain.value.toFixed(2), trimDb: +(20 * Math.log10(nodes.knobTrim.gain.value)).toFixed(2), bass: state.knobs.bass, air: state.knobs.air },
       bassOn: +nodes.bassGain.gain.value.toFixed(3), exciteWet: +nodes.exciteWet.gain.value.toFixed(3),
       exciteType: state.modules.excite.type, air: +nodes.air.gain.value.toFixed(2),
       comp: { th: nodes.comp.threshold.value, ratio: nodes.comp.ratio.value },
       reverb: { wet: +nodes.revSend.gain.value.toFixed(3), ir: state.modules.reverb.ir },
       stereo: { width: state.modules.stereo.width, mid: +nodes.mid.gain.value.toFixed(3), side: +nodes.side.gain.value.toFixed(3) },
+      crossfeed: { on: !!state.modules.crossfeed.on, preset: state.modules.crossfeed.preset, l: +nodes.xfGl.gain.value.toFixed(3), r: +nodes.xfGr.gain.value.toFixed(3) },
       input: +nodes.input.gain.value.toFixed(3), output: +nodes.output.gain.value.toFixed(3), vol: +nodes.vol.gain.value.toFixed(3) };
   },
   state: function () { return deepClone(state.modules); },
@@ -1453,6 +1710,23 @@ window.__ss = {
   exportCfg: function () { return JSON.stringify(currentConfig()); },
   importCfg: function (txt) { if (ui.codeBox) ui.codeBox.value = txt; importPreset(); return window.__ss.state(); },
   spectrum: function () { var s = readSpectrum(); return s ? Array.from(s) : null; },
+  lufs: function () { return { on: !!state.modules.input.autoLoud, now: currentLufs(), autoDb: +autoDb.toFixed(2), gainDb: +(20 * Math.log10(nodes ? nodes.input.gain.value : 1)).toFixed(2) }; },
+  kwRaw: function () {
+    if (!nodes || !nodes.kwAn) return null;
+    var b = nodes.kwBuf;
+    try { nodes.kwAn.getFloatTimeDomainData(b); } catch (e) { return null; }
+    var s = 0; for (var i = 0; i < b.length; i++) s += b[i] * b[i];
+    return { kwRms: +Math.sqrt(s / b.length).toFixed(5), inGain: +nodes.input.gain.value.toFixed(3), kwMs: +kwMs.toExponential(3) };
+  },
+  lr: function (fA, fB) {
+    if (!nodes || !nodes.lrAnL) return null;
+    fA = fA || 200; fB = fB || 3000;
+    try { nodes.lrAnL.getFloatFrequencyData(nodes.lrBufL); nodes.lrAnR.getFloatFrequencyData(nodes.lrBufR); }
+    catch (e) { return null; }
+    function pk(buf, f, an) { return +bandMaxDb(buf, f * 0.9, f * 1.1, an).toFixed(1); }
+    return { L: { a: pk(nodes.lrBufL, fA, nodes.lrAnL), b: pk(nodes.lrBufL, fB, nodes.lrAnL) },
+             R: { a: pk(nodes.lrBufR, fA, nodes.lrAnR), b: pk(nodes.lrBufR, fB, nodes.lrAnR) } };
+  },
   presets: function () { return PRESETS.map(function (p) { return p.id + ':' + p.group + ':' + p.name; }); },
   userPresets: function () { return Object.keys(USER_PRESETS); },
   saveUserPreset: function (n) { saveUserPreset(n); return Object.keys(USER_PRESETS); },
@@ -1460,7 +1734,7 @@ window.__ss = {
   // 调试/性能分析用（只暴露函数引用，不改状态）
   _fn: { applyPreset: function (id) { applyPreset(id); }, applyEQ: function () { applyEQ(); }, applyBass: function () { applyBass(); },
     applyExcite: function () { applyExcite(); }, applyKnobs: function () { applyKnobs(); }, applyComp: function () { applyComp(); }, applyReverb: function () { applyReverb(); },
-    applyStereo: function () { applyStereo(); }, updateUI: function () { updateUI(); }, syncBands: function () { syncBands(); },
+    applyStereo: function () { applyStereo(); }, applyCrossfeed: function () { applyCrossfeed(); }, updateUI: function () { updateUI(); }, syncBands: function () { syncBands(); },
     renderSimple: function () { renderSimple(); }, makeIR: function (ir, s) { return makeIR(IR_DEFS[ir] || IR_DEFS.room, s); },
     bassCurve: function (a) { return bassCurve(a); }, makeCurve: function (k, d) { return makeCurve(k, d); } }
 };
