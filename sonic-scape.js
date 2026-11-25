@@ -101,12 +101,12 @@ function saveUserPresets(o) { try { localStorage.setItem(STORE_PRESETS, JSON.str
 
 var IR_DEFS = {
   none:   { label: '关闭', decay: 0, pre: 0, len: 0.05 },
-  room:   { label: '小房间', decay: 1.8, pre: 0.006, len: 0.35 },
-  hall:   { label: '音乐厅', decay: 2.6, pre: 0.012, len: 0.8 },
-  stage:  { label: '舞台', decay: 2.4, pre: 0.010, len: 0.7 },
-  plate:  { label: '钢板', decay: 3.0, pre: 0.004, len: 0.5 },
-  church: { label: '教堂', decay: 3.2, pre: 0.020, len: 0.9 },
-  spring: { label: '弹簧', decay: 2.0, pre: 0.003, len: 0.3 }
+  room:   { label: '小房间', decay: 1.8, pre: 0.006, len: 0.5 },
+  hall:   { label: '音乐厅', decay: 2.6, pre: 0.012, len: 1.4 },
+  stage:  { label: '舞台', decay: 2.4, pre: 0.010, len: 1.2 },
+  plate:  { label: '钢板', decay: 3.0, pre: 0.004, len: 1.0 },
+  church: { label: '教堂', decay: 3.2, pre: 0.020, len: 1.8 },
+  spring: { label: '弹簧', decay: 2.0, pre: 0.003, len: 0.7 }
 };
 
 // ---------------- 预设库（10 段语义化，名字与效果一致） ----------------
@@ -290,7 +290,7 @@ function buildChain() {
   N.knobHP = ctx.createBiquadFilter(); N.knobHP.type = 'highpass'; N.knobHP.frequency.value = 24; N.knobHP.Q.value = 0;
   N.knobBass = ctx.createBiquadFilter(); N.knobBass.type = 'lowshelf'; N.knobBass.frequency.value = 88; N.knobBass.gain.value = 0;
   N.dynBass = ctx.createBiquadFilter(); N.dynBass.type = 'lowshelf'; N.dynBass.frequency.value = 88; N.dynBass.gain.value = 0;
-  N.knobAir = ctx.createBiquadFilter(); N.knobAir.type = 'highshelf'; N.knobAir.frequency.value = 8500; N.knobAir.gain.value = 0;
+  N.knobAir = ctx.createBiquadFilter(); N.knobAir.type = 'highshelf'; N.knobAir.frequency.value = 6500; N.knobAir.gain.value = 0;
   N.contour = ctx.createBiquadFilter(); N.contour.type = 'peaking'; N.contour.frequency.value = 2800; N.contour.Q.value = 1.2; N.contour.gain.value = 0;
   N.deess = ctx.createBiquadFilter(); N.deess.type = 'peaking'; N.deess.frequency.value = 6500; N.deess.Q.value = 1.4; N.deess.gain.value = 0;
   N.deessAn = ctx.createAnalyser(); N.deessAn.fftSize = 1024; N.deessAn.smoothingTimeConstant = 0.6;
@@ -470,26 +470,28 @@ function applyExcite() {
   try {
     var ck = type + ':' + (m.drive || 0).toFixed(2);
     if (ck !== lastCurveKey) { nodes.exciteWS.curve = makeCurve(type, m.drive || 0); lastCurveKey = ck; }
-    var wet = (type === 'off') ? 0 : clamp(0.25 + (m.drive || 0) * 0.7, 0, 1) * k;
-    nodes.exciteDry.gain.value = 1 - wet * 0.5;             // 互补，电平不翻倍
+    var wet = (type === 'off') ? 0 : clamp(0.2 + (m.drive || 0) * 0.9, 0, 1) * k;
+    nodes.exciteDry.gain.value = 1 - wet * 0.45;             // 互补，电平不翻倍
     nodes.exciteWet.gain.value = wet;
-    nodes.exciteDrive.gain.value = 2 + (m.drive || 0) * 4;  // 前置增益，小信号也能出谐波
-    nodes.air.gain.value = (m.air || 0) * k;
+    nodes.exciteDrive.gain.value = 2 + (m.drive || 0) * 7;  // 前置增益，小信号也能出谐波
+    nodes.air.gain.value = clamp(m.air || 0, 0, 24) * k;
   } catch (e) {}
 }
 function applyComp() {
   if (!nodes) return;
   var m = state.modules.comp;
   try {
-    nodes.comp.threshold.value = clamp(m.th != null ? m.th : -24, -60, 0);
-    nodes.comp.knee.value = clamp(m.knee != null ? m.knee : 4, 0, 40);
+    nodes.comp.threshold.value = clamp(m.th != null ? m.th : -24, -45, 0);
+    nodes.comp.knee.value = clamp(m.knee != null ? m.knee : 4, 0, 60);
     nodes.comp.ratio.value = clamp(m.ratio != null ? m.ratio : 4, 1, 20);
     nodes.comp.attack.value = clamp(m.at != null ? m.at : 0.003, 0, 1);
     nodes.comp.release.value = clamp(m.rel != null ? m.rel : 0.18, 0, 1);
     // 压缩前预增益：把信号顶进阈值，压缩才真正发生；补偿只补回一部分，避免抬峰值
-    var mk = clamp(m.makeup || 0, -12, 12);
-    nodes.compPre.gain.value = dbToGain(clamp(mk * 0.6, -8, 8));
-    nodes.makeup.gain.value = dbToGain(clamp(mk * 0.4, -6, 6));
+    // 阈值拉得越低，自动补回越多音量，用户听到的是「压平」而不是「变小声」
+    var auto = clamp((-28 - (m.th != null ? m.th : -24)) * 0.7, 0, 18);
+    var mk = clamp((m.makeup || 0) + auto, -24, 24);
+    nodes.compPre.gain.value = dbToGain(clamp(mk * 0.6, -16, 16));
+    nodes.makeup.gain.value = dbToGain(clamp(mk * 0.4, -10, 10));
     // 限幅兜住压缩后峰值
     nodes.limiter.threshold.value = m.limiter ? clamp(m.ceiling != null ? m.ceiling : -1, -12, 0) : 0;
     nodes.limiter.ratio.value = m.limiter ? 20 : 1;
@@ -501,13 +503,13 @@ function applyReverb() {
   if (!nodes) return;
   var m = state.modules.reverb;
   try {
-    nodes.revSend.gain.value = (m.ir === 'none') ? 0 : clamp(m.wet != null ? m.wet : 0.2, 0, 1);
-    nodes.predelay.delayTime.value = clamp((m.predelay || 0) / 1000, 0, 0.5);
+    nodes.revSend.gain.value = (m.ir === 'none') ? 0 : clamp(m.wet != null ? m.wet : 0.2, 0, 1.2);
+    nodes.predelay.delayTime.value = clamp((m.predelay || 0) / 1000, 0, 0.3);
     // 目标 IR：按「空间+尺寸」缓存，同一个只生成一次
     var targetIR = null;
     if (m.ir === 'custom' && CUSTOM_IR) targetIR = CUSTOM_IR;
     else if (m.ir !== 'none') {
-      var sz = Math.round(clamp(m.size || 2, 0.5, 4) * 2) / 2;
+      var sz = Math.round(clamp(m.size || 2, 0.5, 6) * 2) / 2;
       var key = (m.ir || 'room') + ':' + sz;
       if (!irCache[key]) irCache[key] = makeIR(IR_DEFS[m.ir] || IR_DEFS.room, sz);
       targetIR = irCache[key];
@@ -524,17 +526,17 @@ function scheduleIR(buf) {
     _irTimer = null;
     var b = _pendingIR; _pendingIR = null;
     if (b && nodes && nodes.conv && nodes.conv.buffer !== b) { try { nodes.conv.buffer = b; } catch (e) {} }
-  }, 90);
+  }, 220);
 }
 function applyStereo() {
   if (!nodes) return;
   var m = state.modules.stereo;
   try {
     var w = clamp(m.width || 0, -1, 1);
-    var sideDb = clamp(m.side || 0, -12, 12);
-    var sideGain = clamp(dbToGain(sideDb) * (1 + w), 0, 4);  // 上限钳位，防过载
+    var sideDb = clamp(m.side || 0, -18, 18);
+    var sideGain = clamp(dbToGain(sideDb) * (1 + w * 1.8), 0, 8);  // 上限钳位，防过载
     nodes.side.gain.value = sideGain;
-    nodes.mid.gain.value = dbToGain(clamp(m.mid || 0, -12, 12));
+    nodes.mid.gain.value = dbToGain(clamp(m.mid || 0, -18, 18));
     nodes.sideHP.frequency.value = (m.sideLowcut && m.sideLowcut > 0) ? clamp(m.sideLowcut, 20, 1000) : 20;
   } catch (e) {}
 }
@@ -570,18 +572,18 @@ function applyKnobs() {
   if (!nodes || !nodes.knobBass) return;
   var k = clamp(state.intensity, 0, 100) / 100;
   var kn = state.knobs || { bass: 0, air: 0 };
-  var bassDb = clamp(kn.bass || 0, 0, 100) / 100 * 8 * k;    // 0..+8dB @88Hz 静态低架
-  var airDb = clamp(kn.air || 0, 0, 100) / 100 * 9 * k;      // 0..+9dB @8.5kHz 高架
-  var contourDb = clamp(kn.air || 0, 0, 100) / 100 * 4 * k;  // 0..+4dB @2.8kHz 轮廓
+  var bassDb = clamp(kn.bass || 0, 0, 100) / 100 * 15 * k;    // 0..+15dB @88Hz 静态低架
+  var airDb = clamp(kn.air || 0, 0, 100) / 100 * 18 * k;     // 0..+18dB @6.5kHz 高架
+  var contourDb = clamp(kn.air || 0, 0, 100) / 100 * 8 * k;  // 0..+8dB @2.8kHz 轮廓
   try {
     nodes.knobBass.gain.setTargetAtTime(bassDb, ctx.currentTime, 0.03);
     nodes.knobAir.gain.setTargetAtTime(airDb, ctx.currentTime, 0.03);
     nodes.contour.gain.setTargetAtTime(contourDb, ctx.currentTime, 0.03);
     // 等响补偿：提升多的部分预先让出余量，限幅器不猛压，整体音量不跳
-    var trimDb = -(bassDb * 0.20 + airDb * 0.12 + contourDb * 0.10);
+    var trimDb = -(bassDb * 0.22 + airDb * 0.12 + contourDb * 0.08);
     nodes.knobTrim.gain.setTargetAtTime(Math.pow(10, trimDb / 20), ctx.currentTime, 0.03);
   } catch (e) {}
-  dynWant = bassDb * 0.75;   // 动态低音最多再补 75% 的静态量
+  dynWant = bassDb * 0.8;   // 动态低音最多再补 80% 的静态量
   syncDyn();
   applyDeess();
 }
@@ -636,20 +638,20 @@ function applyDeess() {
   try { nodes.deessAn.getFloatFrequencyData(nodes.deessBuf); db = bandMaxDb(nodes.deessBuf, 5000, 9000, nodes.deessAn); } catch (e) {}
   // 齿音是尖峰，看峰值。超过 -42dB 开始压，最多 -3.5dB
   var over = clamp((db + 42) / 20, 0, 1);
-  try { nodes.deess.gain.setTargetAtTime(-3.5 * over, ctx.currentTime, 0.06); } catch (e) {}
+  try { nodes.deess.gain.setTargetAtTime(-6 * over, ctx.currentTime, 0.06); } catch (e) {}
 }
 
 function applyCrossfeed() {
   if (!nodes || !nodes.xfGl) return;
   var m = state.modules.crossfeed || { on: false, preset: 'mid', level: 0.35 };
-  var pres = { low: { fc: 360, feed: 0.398 }, mid: { fc: 500, feed: 0.46 }, high: { fc: 700, feed: 0.53 } }[m.preset] || { fc: 500, feed: 0.46 };
-  var lv = clamp(m.level == null ? 0.35 : m.level, 0, 1);
+  var pres = { low: { fc: 360, feed: 0.6 }, mid: { fc: 500, feed: 0.7 }, high: { fc: 700, feed: 0.8 } }[m.preset] || { fc: 500, feed: 0.7 };
+  var lv = clamp(m.level == null ? 0.35 : m.level, 0, 1.2);
   try {
     nodes.xfLPl.frequency.setTargetAtTime(pres.fc, ctx.currentTime, 0.04);
     nodes.xfLPr.frequency.setTargetAtTime(pres.fc, ctx.currentTime, 0.04);
     nodes.xfGl.gain.setTargetAtTime(m.on ? pres.feed * lv : 0, ctx.currentTime, 0.04);
     nodes.xfGr.gain.setTargetAtTime(m.on ? pres.feed * lv : 0, ctx.currentTime, 0.04);
-    var dry = m.on ? (1 - 0.15 * lv) : 1;
+    var dry = m.on ? (1 - 0.22 * lv) : 1;
     nodes.xfDryL.gain.setTargetAtTime(dry, ctx.currentTime, 0.04);
     nodes.xfDryR.gain.setTargetAtTime(dry, ctx.currentTime, 0.04);
   } catch (e) {}
@@ -1023,28 +1025,35 @@ function buildPresetSide(side) {
 }
 
 // ---------------- 右栏：旋钮 + 强度 ----------------
+// 旋钮数值直接显示实际增益，0-100 太抽象
+function knobText(k, v) {
+  if (k === 'bass') return '+' + Math.round(clamp(v, 0, 100) / 100 * 15);
+  if (k === 'air') return '+' + Math.round(clamp(v, 0, 100) / 100 * 18);
+  return String(Math.round(v));
+}
 function buildHero(hero) {
   hero.innerHTML = '';
   var knobs = el('div', 'ss-knobs');
   [['bass', '低音'], ['air', '亮度'], ['space', '声场'], ['reverb', '混响']].forEach(function (p) {
     var k = p[0], label = p[1];
     var box = el('div', 'ss-knob');
-    var val = el('div', 'ss-knob-v', '0');
+    var start = k === 'space' ? 50 : 0;
+    var val = el('div', 'ss-knob-v', knobText(k, start));
     box.appendChild(val);
     var rng = el('input', 'ss-knob-r'); rng.type = 'range'; rng.min = 0; rng.max = 100; rng.step = 1;
     rng.setAttribute('data-knob', k);
     rng.setAttribute('data-def', k === 'space' ? 50 : 0);
-    rng.value = k === 'space' ? 50 : 0;
-    rng.title = k === 'bass' ? '88Hz 低架最多 +8dB，再按音乐低频自动补 0-6dB'
-      : k === 'air' ? '8.5kHz 高架 + 2.8kHz 轮廓，最多 +13dB'
+    rng.value = start;
+    rng.title = k === 'bass' ? '88Hz 低架最多 +15dB，再按音乐低频动态补最多 +12dB'
+      : k === 'air' ? '6.5kHz 高架最多 +18dB，加 2.8kHz 轮廓 +8dB'
       : k === 'space' ? '立体声宽度，50 为原始'
       : '混响湿度';
     rng.addEventListener('input', function () {
-      setKnob(k, parseFloat(rng.value)); val.textContent = rng.value;
+      setKnob(k, parseFloat(rng.value)); val.textContent = knobText(k, rng.value);
     });
     rng.addEventListener('dblclick', function () {
       var d = parseInt(rng.getAttribute('data-def'), 10);
-      rng.value = d; setKnob(k, d); val.textContent = d; toast(label + ' 已复位');
+      rng.value = d; setKnob(k, d); val.textContent = knobText(k, d); toast(label + ' 已复位');
     });
     box.appendChild(rng);
     box.appendChild(el('div', 'ss-knob-l', label));
@@ -1073,9 +1082,9 @@ function setKnob(k, v) {
   if (!state.knobs) state.knobs = { bass: 0, air: 0 };
   if (k === 'bass') { state.knobs.bass = clamp(v, 0, 100); saveState(); applyKnobs(); return; }
   if (k === 'air') { state.knobs.air = clamp(v, 0, 100); saveState(); applyKnobs(); return; }
-  if (k === 'space') { m.stereo.width = (v - 50) / 50 * 0.8; }
+  if (k === 'space') { m.stereo.width = (v - 50) / 50 * 1.0; }
   else if (k === 'reverb') {
-    m.reverb.wet = v / 100 * 0.9;
+    m.reverb.wet = v / 100 * 1.2;
     if (v <= 2) m.reverb.ir = 'none';
     else if (m.reverb.ir === 'none') m.reverb.ir = 'room';
   }
@@ -1087,7 +1096,7 @@ function knobsFromModules() {
     bass: Math.round(clamp(kn.bass || 0, 0, 100)),
     air: Math.round(clamp(kn.air || 0, 0, 100)),
     space: Math.round(((m.stereo && m.stereo.width || 0) + 1) / 2 * 100),
-    reverb: Math.round(Math.min(1, (m.reverb && m.reverb.wet || 0) / 0.9) * 100)
+    reverb: Math.round(Math.min(1, (m.reverb && m.reverb.wet || 0) / 1.2) * 100)
   };
 }
 function renderSimple() {
@@ -1098,7 +1107,7 @@ function renderSimple() {
     var k = rs[i].getAttribute('data-knob');
     rs[i].value = kv[k];
     var v = rs[i].parentNode.querySelector('.ss-knob-v');
-    if (v) v.textContent = kv[k];
+    if (v) v.textContent = knobText(k, kv[k]);
   }
 }
 
@@ -1179,15 +1188,15 @@ function buildDynPage(p) {
   bindCtl(function () { return state.modules.excite.type; }, function (x) { typeSel.value = x; });
 
   var d = slider(0, 1, 0.05, state.modules.excite.drive, function (v) { state.modules.excite.drive = v; applyExcite(); }, function (x) { return num(x, 1); });
-  var a = slider(0, 12, 0.5, state.modules.excite.air, function (v) { state.modules.excite.air = v; applyExcite(); }, function (x) { return num(x, 1); });
+  var a = slider(0, 24, 0.5, state.modules.excite.air, function (v) { state.modules.excite.air = v; applyExcite(); }, function (x) { return num(x, 1); });
   g1.appendChild(row('驱动', d.s, d.v)); g1.appendChild(row('空气感', a.s, a.v));
   bindCtl(function () { return state.modules.excite.drive; }, d.set);
   bindCtl(function () { return state.modules.excite.air; }, a.set);
 
   var g2 = group('压缩器'); p.appendChild(g2);
   var cw = el('div', 'ss-cols');
-  [['阈值dB', 'th', -60, 0, 1, 0], ['拐点', 'knee', 0, 40, 1, 0], ['比率', 'ratio', 1, 20, 0.5, 0],
-   ['启动', 'at', 0, 1, 0.005, 2], ['释放', 'rel', 0, 1, 0.01, 2], ['补偿dB', 'makeup', -12, 12, 0.5, 1]].forEach(function (cfg) {
+  [['阈值dB', 'th', -45, 0, 1, 0], ['拐点', 'knee', 0, 60, 1, 0], ['比率', 'ratio', 1, 20, 0.5, 0],
+   ['启动', 'at', 0, 1, 0.005, 2], ['释放', 'rel', 0, 1, 0.01, 2], ['补偿dB', 'makeup', -24, 24, 0.5, 1]].forEach(function (cfg) {
     var key = cfg[1];
     var fmt = function (x) {
       if (key === 'at' || key === 'rel') return Math.round(x * 1000) + 'ms';
@@ -1219,9 +1228,9 @@ function buildSpacePage(p) {
   g.appendChild(row('空间', irSel));
   bindCtl(function () { return state.modules.reverb.ir; }, function (x) { irSel.value = x; });
 
-  var w = slider(0, 1, 0.01, state.modules.reverb.wet, function (v) { state.modules.reverb.wet = v; applyReverb(); }, function (x) { return Math.round(x * 100) + '%'; });
-  var pd = slider(0, 200, 1, state.modules.reverb.predelay, function (v) { state.modules.reverb.predelay = v; applyReverb(); }, function (x) { return Math.round(x) + 'ms'; });
-  var sz = slider(0.5, 4, 0.1, state.modules.reverb.size, function (v) { state.modules.reverb.size = v; applyReverb(); }, function (x) { return num(x, 1); });
+  var w = slider(0, 1.2, 0.01, state.modules.reverb.wet, function (v) { state.modules.reverb.wet = v; applyReverb(); }, function (x) { return Math.round(x * 100) + '%'; });
+  var pd = slider(0, 300, 1, state.modules.reverb.predelay, function (v) { state.modules.reverb.predelay = v; applyReverb(); }, function (x) { return Math.round(x) + 'ms'; });
+  var sz = slider(0.5, 6, 0.1, state.modules.reverb.size, function (v) { state.modules.reverb.size = v; applyReverb(); }, function (x) { return num(x, 1); });
   g.appendChild(row('湿度', w.s, w.v)); g.appendChild(row('预延时', pd.s, pd.v)); g.appendChild(row('尺寸', sz.s, sz.v));
   bindCtl(function () { return state.modules.reverb.wet; }, w.set);
   bindCtl(function () { return state.modules.reverb.predelay; }, pd.set);
@@ -1237,8 +1246,8 @@ function buildSpacePage(p) {
 function buildStereoPage(p) {
   var g = group('立体声场 / 中侧'); p.appendChild(g);
   var w = slider(-1, 1, 0.05, state.modules.stereo.width, function (v) { state.modules.stereo.width = v; applyStereo(); }, function (x) { return Math.round((x + 1) / 2 * 100); });
-  var mid = slider(-12, 12, 0.5, state.modules.stereo.mid, function (v) { state.modules.stereo.mid = v; applyStereo(); }, function (x) { return num(x, 1) + 'dB'; });
-  var side = slider(-12, 12, 0.5, state.modules.stereo.side, function (v) { state.modules.stereo.side = v; applyStereo(); }, function (x) { return num(x, 1) + 'dB'; });
+  var mid = slider(-18, 18, 0.5, state.modules.stereo.mid, function (v) { state.modules.stereo.mid = v; applyStereo(); }, function (x) { return num(x, 1) + 'dB'; });
+  var side = slider(-18, 18, 0.5, state.modules.stereo.side, function (v) { state.modules.stereo.side = v; applyStereo(); }, function (x) { return num(x, 1) + 'dB'; });
   var lc = slider(0, 1000, 10, state.modules.stereo.sideLowcut, function (v) { state.modules.stereo.sideLowcut = v; applyStereo(); }, function (x) { return x > 0 ? Math.round(x) + 'Hz' : '关'; });
   g.appendChild(row('宽度', w.s, w.v)); g.appendChild(row('中央M', mid.s, mid.v));
   g.appendChild(row('侧向S', side.s, side.v)); g.appendChild(row('侧向低切', lc.s, lc.v));
@@ -1267,7 +1276,7 @@ function buildStereoPage(p) {
     state.modules.crossfeed.preset, function (v) { state.modules.crossfeed.preset = v; applyCrossfeed(); });
   g3.appendChild(row('强度档', cfSel));
   bindCtl(function () { return state.modules.crossfeed.preset; }, function (x) { cfSel.value = x; });
-  var cfLv = slider(0, 1, 0.05, state.modules.crossfeed.level, function (v) { state.modules.crossfeed.level = v; applyCrossfeed(); }, function (x) { return Math.round(x * 100) + '%'; });
+  var cfLv = slider(0, 1.2, 0.05, state.modules.crossfeed.level, function (v) { state.modules.crossfeed.level = v; applyCrossfeed(); }, function (x) { return Math.round(x * 100) + '%'; });
   g3.appendChild(row('混合量', cfLv.s, cfLv.v));
   bindCtl(function () { return state.modules.crossfeed.level; }, cfLv.set);
 }
@@ -1451,11 +1460,16 @@ function bindEQDrag() {
   });
   ui.eqCanvas.addEventListener('pointerup', function () { if (drag >= 0) { drag = -1; toast('频段已更新'); } });
 }
-// 旋钮低架/高架在某个频率上的增益，用于曲线和圆点对齐
+// 旋钮低架/高架/轮廓在某个频率上的增益，用于曲线和圆点对齐
 function knobDbAt(f) {
   var k = clamp(state.intensity, 0, 100) / 100, kn = state.knobs || {};
-  return (clamp(kn.bass || 0, 0, 100) / 100 * 10 * k) / (1 + Math.pow(f / 88, 2))
-    + (clamp(kn.air || 0, 0, 100) / 100 * 9 * k) / (1 + Math.pow(8500 / f, 2));
+  var b = clamp(kn.bass || 0, 0, 100) / 100 * 15 * k;
+  var a = clamp(kn.air || 0, 0, 100) / 100 * 18 * k;
+  var c = clamp(kn.air || 0, 0, 100) / 100 * 8 * k;
+  var ratio = Math.log(Math.max(1, f) / 2800) / Math.LN2;
+  return b / (1 + Math.pow(f / 88, 2))
+    + a / (1 + Math.pow(6500 / f, 2))
+    + c * Math.exp(-(ratio * ratio) / (2 * 1.2 * 1.2 * 0.32));
 }
 function eqCanvasPos(b, i) {
   var W = ui.eqCanvas.width, H = ui.eqCanvas.height;
@@ -1701,6 +1715,7 @@ window.__ss = {
   setEQ: function (i, obj) { if (!state.modules.eq.bands[i]) return null; for (var k in obj) state.modules.eq.bands[i][k] = obj[k]; applyEQ(); syncBands(); ui.eqDirty = true; drawEQCurve(); return window.__ss.params().eq; },
   setIntensity: function (v) { state.intensity = clamp(v, 0, 100) | 0; saveState(); applyEQ(); applyKnobs(); applyExcite(); ui.eqDirty = true; return window.__ss.params().eq; },
   setKnobs: function (b, a) { if (!state.knobs) state.knobs = { bass: 0, air: 0 }; state.knobs.bass = clamp(b || 0, 0, 100); state.knobs.air = clamp(a || 0, 0, 100); saveState(); applyKnobs(); renderSimple(); return window.__ss.params().knobs; },
+  setNode: function (name, param, val) { if (!nodes || !nodes[name]) return null; try { nodes[name][param].value = val; } catch (e) { return null; } return +nodes[name][param].value.toFixed(3); },
   smart: function (on) { toggleSmart(on !== false); return window.__ss.diag(); },
   ab: function () { toggleAB(); return window.__ss.diag(); },
   enabled: function () { toggleEnabled(); return window.__ss.diag(); },
