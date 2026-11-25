@@ -486,7 +486,7 @@ function applyEnabled() {
 function applyAll() {
   applyInput(); applyBass(); applyEQ(); applyKnobs(); applyExcite(); applyComp(); applyReverb(); applyStereo(); applyOutput();
   applyEnabled(); syncVolume();
-  updateUI(); if (typeof syncBands === 'function') syncBands(); ui.eqDirty = true;
+  updateUI(); if (typeof syncBands === 'function') syncBands(); if (typeof syncCtrls === 'function') syncCtrls(); ui.eqDirty = true;
 }
 
 // 顶部旋钮：低音走低架、亮度走高架，都是干净增益，各自独立不互相掩蔽
@@ -715,7 +715,7 @@ function bindShortcuts() {
 
 // ---------------- UI 基础 ----------------
 var ui = { btn: null, panel: null, diag: null, canvas: null, cctx: null, eqCanvas: null, eqc: null,
-  raf: null, tab: 'eq', knobs: null, bandCtl: [], built: false, eqDirty: true, vizOn: false };
+  raf: null, tab: 'eq', knobs: null, bandCtl: [], binds: [], built: false, eqDirty: true, vizOn: false };
 
 function el(tag, cls, txt) { var e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; }
 function num(v, d) { return (+v).toFixed(d == null ? 2 : d); }
@@ -838,6 +838,14 @@ function switchTab(k) {
 }
 function page(parent, key) { var p = el('div', 'ss-page'); p.setAttribute('data-page', key); p.style.display = 'none'; parent.appendChild(p); return p; }
 
+// 控件回读：切预设/导入后把界面数值刷成 state 里的真实值
+function bindCtl(getFn, setFn) { ui.binds.push({ g: getFn, s: setFn }); return setFn; }
+function syncCtrls() {
+  for (var i = 0; i < ui.binds.length; i++) {
+    try { var b = ui.binds[i]; b.s(b.g()); } catch (e) {}
+  }
+}
+
 
 // ---------------- 左栏：预设库 ----------------
 function buildPresetSide(side) {
@@ -906,6 +914,7 @@ function buildHero(hero) {
   sr.appendChild(s); sr.appendChild(sv);
   hero.appendChild(sr);
   ui.strength = s; ui.strengthV = sv;
+  bindCtl(function () { return state.intensity; }, function (x) { s.value = x; sv.textContent = Math.round(x) + '%'; });
   renderSimple();
 }
 
@@ -950,27 +959,32 @@ function buildEQPage(p) {
   p.appendChild(ui.eqCanvas); ui.eqc = ui.eqCanvas.getContext('2d');
   bindEQDrag();
   var box = el('div', 'ss-bands'); p.appendChild(box); ui.bandsBox = box;
-  // 只建一次，后续只更新数值
+  // 只建一次，后续只更新数值；回调按索引实时读 state，切预设后依然有效
   ui.bandCtl = [];
-  state.modules.eq.bands.forEach(function (b, i) {
+  state.modules.eq.bands.forEach(function (b0, i) {
+    function band() {
+      var bands = state.modules.eq && state.modules.eq.bands;
+      if (!bands || !bands[i]) { state.modules.eq = { bands: defaultBands() }; bands = state.modules.eq.bands; }
+      return bands[i];
+    }
     var line = el('div', 'ss-band');
     var name = el('span', 'ss-band-n', EQ_FREQS[i] >= 1000 ? (EQ_FREQS[i] / 1000) + 'k' : EQ_FREQS[i]);
-    var gs = el('input', 'ss-rng'); gs.type = 'range'; gs.min = -15; gs.max = 15; gs.step = 0.5; gs.value = b.gain;
-    var gv = el('span', 'ss-val', num(b.gain, 1) + 'dB');
+    var gs = el('input', 'ss-rng'); gs.type = 'range'; gs.min = -15; gs.max = 15; gs.step = 0.5; gs.value = b0.gain;
+    var gv = el('span', 'ss-val', num(b0.gain, 1) + 'dB');
     gs.addEventListener('input', function () {
-      b.gain = parseFloat(gs.value); gv.textContent = num(b.gain, 1) + 'dB';
+      var b = band(); b.gain = parseFloat(gs.value); gv.textContent = num(b.gain, 1) + 'dB';
       applyEQ(); ui.eqDirty = true;
     });
-    gs.addEventListener('dblclick', function () { b.gain = 0; gs.value = 0; gv.textContent = '0.0dB'; applyEQ(); ui.eqDirty = true; });
+    gs.addEventListener('dblclick', function () { band().gain = 0; gs.value = 0; gv.textContent = '0.0dB'; applyEQ(); ui.eqDirty = true; });
     var more = el('button', 'ss-band-more', '⋯'); more.title = '类型/频率/Q';
     var detail = el('div', 'ss-band-detail'); detail.style.display = 'none';
     var typeSel = select([
       { value: 'peaking', label: '峰值' }, { value: 'lowshelf', label: '低架' }, { value: 'highshelf', label: '高架' },
       { value: 'lowpass', label: '低通' }, { value: 'highpass', label: '高通' }
-    ], b.type, function (v) { b.type = v; applyEQ(); ui.eqDirty = true; });
-    var fSl = slider(20, 20000, 1, b.freq, function (v) { b.freq = v; applyEQ(); ui.eqDirty = true; },
+    ], b0.type, function (v) { band().type = v; applyEQ(); ui.eqDirty = true; });
+    var fSl = slider(20, 20000, 1, b0.freq, function (v) { band().freq = v; applyEQ(); ui.eqDirty = true; },
       function (x) { return x >= 1000 ? (x / 1000).toFixed(1) + 'k' : Math.round(x); });
-    var qSl = slider(0.1, 10, 0.1, b.q, function (v) { b.q = v; applyEQ(); ui.eqDirty = true; }, function (x) { return num(x, 1); });
+    var qSl = slider(0.1, 10, 0.1, b0.q, function (v) { band().q = v; applyEQ(); ui.eqDirty = true; }, function (x) { return num(x, 1); });
     detail.appendChild(row('类型', typeSel));
     detail.appendChild(row('频率', fSl.s, fSl.v));
     detail.appendChild(row('Q', qSl.s, qSl.v));
@@ -980,7 +994,7 @@ function buildEQPage(p) {
     });
     line.appendChild(name); line.appendChild(gs); line.appendChild(gv); line.appendChild(more);
     box.appendChild(line); box.appendChild(detail);
-    ui.bandCtl.push({ gain: gs, gv: gv, typeSel: typeSel, freq: fSl, q: qSl, band: b });
+    ui.bandCtl.push({ gain: gs, gv: gv, typeSel: typeSel, freq: fSl, q: qSl, idx: i });
   });
   var flat = el('button', 'ss-btn', '全部归零');
   flat.addEventListener('click', function (e) {
@@ -1001,84 +1015,115 @@ function syncBands() {
   }
 }
 
-﻿
+
 // ---------------- 动态 / 混响 / 声场 / IO / 生态 ----------------
+// 注意：所有回调都实时从 state.modules 取值，不缓存对象引用，
+// 否则切预设（state.modules 整体替换）后控件就写到废弃对象上，表现为「调了没反应」。
+
 function buildDynPage(p) {
   var g1 = group('激励 / 饱和'); p.appendChild(g1);
-  var m = state.modules.excite;
-  g1.appendChild(row('类型', select([
+  var typeSel = select([
     { value: 'off', label: '关闭' }, { value: 'tube', label: '电子管' }, { value: 'tape', label: '磁带' }, { value: 'soft', label: '柔和' }
-  ], m.type, function (v) { m.type = v; applyExcite(); })));
-  var d = slider(0, 1, 0.05, m.drive, function (v) { m.drive = v; applyExcite(); }, function (x) { return num(x, 1); });
-  var a = slider(0, 12, 0.5, m.air, function (v) { m.air = v; applyExcite(); }, function (x) { return num(x, 1); });
+  ], state.modules.excite.type, function (v) { state.modules.excite.type = v; applyExcite(); });
+  g1.appendChild(row('类型', typeSel));
+  bindCtl(function () { return state.modules.excite.type; }, function (x) { typeSel.value = x; });
+
+  var d = slider(0, 1, 0.05, state.modules.excite.drive, function (v) { state.modules.excite.drive = v; applyExcite(); }, function (x) { return num(x, 1); });
+  var a = slider(0, 12, 0.5, state.modules.excite.air, function (v) { state.modules.excite.air = v; applyExcite(); }, function (x) { return num(x, 1); });
   g1.appendChild(row('驱动', d.s, d.v)); g1.appendChild(row('空气感', a.s, a.v));
+  bindCtl(function () { return state.modules.excite.drive; }, d.set);
+  bindCtl(function () { return state.modules.excite.air; }, a.set);
 
   var g2 = group('压缩器'); p.appendChild(g2);
-  var c = state.modules.comp;
   var cw = el('div', 'ss-cols');
   [['阈值dB', 'th', -60, 0, 1, 0], ['拐点', 'knee', 0, 40, 1, 0], ['比率', 'ratio', 1, 20, 0.5, 0],
-   ['启动s', 'at', 0, 1, 0.005, 2], ['释放s', 'rel', 0, 1, 0.01, 2], ['补偿dB', 'makeup', -12, 12, 0.5, 1]].forEach(function (cfg) {
-    var s = slider(cfg[2], cfg[3], cfg[4], c[cfg[1]], function (v) { c[cfg[1]] = v; applyComp(); }, function (x) { return num(x, cfg[5]); });
+   ['启动', 'at', 0, 1, 0.005, 2], ['释放', 'rel', 0, 1, 0.01, 2], ['补偿dB', 'makeup', -12, 12, 0.5, 1]].forEach(function (cfg) {
+    var key = cfg[1];
+    var fmt = function (x) {
+      if (key === 'at' || key === 'rel') return Math.round(x * 1000) + 'ms';
+      return num(x, cfg[5]);
+    };
+    var s = slider(cfg[2], cfg[3], cfg[4], state.modules.comp[key], function (v) { state.modules.comp[key] = v; applyComp(); }, fmt);
     cw.appendChild(row(cfg[0], s.s, s.v));
+    bindCtl(function () { return state.modules.comp[key]; }, s.set);
   });
   g2.appendChild(cw);
-  var lc = check('真峰限幅', c.limiter, function (v) { c.limiter = v; applyComp(); });
+  var lc = check('真峰限幅', state.modules.comp.limiter, function (v) { state.modules.comp.limiter = v; applyComp(); });
   g2.appendChild(lc.wrap);
-  var ce = slider(-12, 0, 0.5, c.ceiling == null ? -1 : c.ceiling, function (v) { c.ceiling = v; applyComp(); }, function (x) { return num(x, 1) + 'dB'; });
+  bindCtl(function () { return !!state.modules.comp.limiter; }, lc.set);
+  var ce = slider(-12, 0, 0.5, state.modules.comp.ceiling == null ? -1 : state.modules.comp.ceiling, function (v) { state.modules.comp.ceiling = v; applyComp(); }, function (x) { return num(x, 1) + 'dB'; });
   g2.appendChild(row('限幅顶', ce.s, ce.v));
+  bindCtl(function () { var c = state.modules.comp; return c.ceiling == null ? -1 : c.ceiling; }, ce.set);
 }
 
 function buildSpacePage(p) {
   var g = group('卷积混响'); p.appendChild(g);
-  var m = state.modules.reverb;
   var opts = Object.keys(IR_DEFS).map(function (k) { return { value: k, label: IR_DEFS[k].label }; });
   opts.push({ value: 'custom', label: '自定义 IR…' });
-  g.appendChild(row('空间', select(opts, m.ir, function (v) {
-    m.ir = v; if (v === 'custom' && !CUSTOM_IR) openIRPicker(); applyReverb();
+  var irSel = select(opts, state.modules.reverb.ir, function (v) {
+    state.modules.reverb.ir = v;
+    if (v === 'custom' && !CUSTOM_IR) openIRPicker();
+    applyReverb();
     toast('混响：' + (IR_DEFS[v] ? IR_DEFS[v].label : '自定义'));
-  })));
-  var w = slider(0, 1, 0.01, m.wet, function (v) { m.wet = v; applyReverb(); }, function (x) { return Math.round(x * 100) + '%'; });
-  var pd = slider(0, 200, 1, m.predelay, function (v) { m.predelay = v; applyReverb(); }, function (x) { return Math.round(x) + 'ms'; });
-  var sz = slider(0.5, 4, 0.1, m.size, function (v) { m.size = v; applyReverb(); }, function (x) { return num(x, 1); });
+  });
+  g.appendChild(row('空间', irSel));
+  bindCtl(function () { return state.modules.reverb.ir; }, function (x) { irSel.value = x; });
+
+  var w = slider(0, 1, 0.01, state.modules.reverb.wet, function (v) { state.modules.reverb.wet = v; applyReverb(); }, function (x) { return Math.round(x * 100) + '%'; });
+  var pd = slider(0, 200, 1, state.modules.reverb.predelay, function (v) { state.modules.reverb.predelay = v; applyReverb(); }, function (x) { return Math.round(x) + 'ms'; });
+  var sz = slider(0.5, 4, 0.1, state.modules.reverb.size, function (v) { state.modules.reverb.size = v; applyReverb(); }, function (x) { return num(x, 1); });
   g.appendChild(row('湿度', w.s, w.v)); g.appendChild(row('预延时', pd.s, pd.v)); g.appendChild(row('尺寸', sz.s, sz.v));
+  bindCtl(function () { return state.modules.reverb.wet; }, w.set);
+  bindCtl(function () { return state.modules.reverb.predelay; }, pd.set);
+  bindCtl(function () { return state.modules.reverb.size; }, sz.set);
+
   var imp = el('button', 'ss-btn', '导入自定义 IR (.wav)');
   imp.addEventListener('click', function (e) { e.preventDefault(); openIRPicker(); });
   g.appendChild(imp);
-  g.appendChild(el('p', 'ss-hint', CUSTOM_IR ? ('已载入：' + CUSTOM_IR_NAME) : '可选单/双声道 wav 作为脉冲响应'));
+  ui.irHint = el('p', 'ss-hint', CUSTOM_IR ? ('已载入：' + CUSTOM_IR_NAME) : '可选单/双声道 wav 作为脉冲响应');
+  g.appendChild(ui.irHint);
 }
 
 function buildStereoPage(p) {
   var g = group('立体声场 / 中侧'); p.appendChild(g);
-  var m = state.modules.stereo;
-  var w = slider(-1, 1, 0.05, m.width, function (v) { m.width = v; applyStereo(); }, function (x) { return Math.round((x + 1) / 2 * 100); });
-  var mid = slider(-12, 12, 0.5, m.mid, function (v) { m.mid = v; applyStereo(); }, function (x) { return num(x, 1) + 'dB'; });
-  var side = slider(-12, 12, 0.5, m.side, function (v) { m.side = v; applyStereo(); }, function (x) { return num(x, 1) + 'dB'; });
-  var lc = slider(0, 1000, 10, m.sideLowcut, function (v) { m.sideLowcut = v; applyStereo(); }, function (x) { return x > 0 ? Math.round(x) + 'Hz' : '关'; });
+  var w = slider(-1, 1, 0.05, state.modules.stereo.width, function (v) { state.modules.stereo.width = v; applyStereo(); }, function (x) { return Math.round((x + 1) / 2 * 100); });
+  var mid = slider(-12, 12, 0.5, state.modules.stereo.mid, function (v) { state.modules.stereo.mid = v; applyStereo(); }, function (x) { return num(x, 1) + 'dB'; });
+  var side = slider(-12, 12, 0.5, state.modules.stereo.side, function (v) { state.modules.stereo.side = v; applyStereo(); }, function (x) { return num(x, 1) + 'dB'; });
+  var lc = slider(0, 1000, 10, state.modules.stereo.sideLowcut, function (v) { state.modules.stereo.sideLowcut = v; applyStereo(); }, function (x) { return x > 0 ? Math.round(x) + 'Hz' : '关'; });
   g.appendChild(row('宽度', w.s, w.v)); g.appendChild(row('中央M', mid.s, mid.v));
   g.appendChild(row('侧向S', side.s, side.v)); g.appendChild(row('侧向低切', lc.s, lc.v));
+  bindCtl(function () { return state.modules.stereo.width; }, w.set);
+  bindCtl(function () { return state.modules.stereo.mid; }, mid.set);
+  bindCtl(function () { return state.modules.stereo.side; }, side.set);
+  bindCtl(function () { return state.modules.stereo.sideLowcut; }, lc.set);
 
   var g2 = group('低音谐波增强（进阶）'); p.appendChild(g2);
   g2.appendChild(el('p', 'ss-hint', '给超低音补谐波，让手机小喇叭也听得到低频。会产生额外谐波，默认关闭；平时用顶部「低音」旋钮就够，那个是干净的。'));
-  var bm = state.modules.bass;
-  var on = check('开启', bm.on, function (v) { bm.on = v; applyBass(); });
+  var on = check('开启', state.modules.bass.on, function (v) { state.modules.bass.on = v; applyBass(); });
   g2.appendChild(on.wrap);
-  var f = slider(30, 250, 5, bm.freq, function (v) { bm.freq = v; applyBass(); }, function (x) { return Math.round(x) + 'Hz'; });
-  var am = slider(0, 1, 0.05, bm.amount, function (v) { bm.amount = v; applyBass(); }, function (x) { return num(x, 1); });
+  bindCtl(function () { return !!state.modules.bass.on; }, on.set);
+  var f = slider(30, 250, 5, state.modules.bass.freq, function (v) { state.modules.bass.freq = v; applyBass(); }, function (x) { return Math.round(x) + 'Hz'; });
+  var am = slider(0, 1, 0.05, state.modules.bass.amount, function (v) { state.modules.bass.amount = v; applyBass(); }, function (x) { return num(x, 1); });
   g2.appendChild(row('中心频率', f.s, f.v)); g2.appendChild(row('谐波量', am.s, am.v));
+  bindCtl(function () { return state.modules.bass.freq; }, f.set);
+  bindCtl(function () { return state.modules.bass.amount; }, am.set);
 }
 
 function buildIOPage(p) {
   var g = group('输入'); p.appendChild(g);
-  var m = state.modules.input;
-  var c = check('响度自动匹配（配合智能）', m.autoLoud, function (v) { m.autoLoud = v; if (!v) m.autoGainDb = 0; applyInput(); });
+  var c = check('响度自动匹配（配合智能）', state.modules.input.autoLoud, function (v) {
+    state.modules.input.autoLoud = v; if (!v) state.modules.input.autoGainDb = 0; applyInput();
+  });
   g.appendChild(c.wrap);
-  var ig = slider(-24, 24, 0.5, m.gain, function (v) { m.gain = v; applyInput(); }, function (x) { return num(x, 1) + 'dB'; });
+  bindCtl(function () { return !!state.modules.input.autoLoud; }, c.set);
+  var ig = slider(-24, 24, 0.5, state.modules.input.gain, function (v) { state.modules.input.gain = v; applyInput(); }, function (x) { return num(x, 1) + 'dB'; });
   g.appendChild(row('输入增益', ig.s, ig.v));
+  bindCtl(function () { return state.modules.input.gain; }, ig.set);
 
   var g2 = group('输出'); p.appendChild(g2);
-  var om = state.modules.output;
-  var og = slider(-24, 12, 0.5, om.gain, function (v) { om.gain = v; applyOutput(); }, function (x) { return num(x, 1) + 'dB'; });
+  var og = slider(-24, 12, 0.5, state.modules.output.gain, function (v) { state.modules.output.gain = v; applyOutput(); }, function (x) { return num(x, 1) + 'dB'; });
   g2.appendChild(row('输出增益', og.s, og.v));
+  bindCtl(function () { return state.modules.output.gain; }, og.set);
   g2.appendChild(el('p', 'ss-hint', '音量/静音由插件接管补偿，宿主滑块照常有效'));
 }
 
