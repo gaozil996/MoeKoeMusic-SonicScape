@@ -20,6 +20,7 @@
 .ss-btn:active { transform: scale(.96); }
 .ss-btn.ss-on { border-color: #5eead4; color: #0b0f16; background: #5eead4; font-weight: 600; }
 .ss-btn.ss-power { min-width: 62px; }
+.ss-btn.ss-power.ss-off { border-color: rgba(244,63,94,.55); color: #fb7185; background: rgba(244,63,94,.08); }
 .ss-close { padding: 7px 11px; font-size: 15px; line-height: 1; }
 
 /* 主体 */

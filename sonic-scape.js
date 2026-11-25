@@ -513,7 +513,9 @@ function claim(el) {
   installSetSinkHook(el);
   el.addEventListener('play', onPlay, true);
   resume(); setTimeout(resume, 300); setTimeout(resume, 1000);
-  state.enabled = true; enabledApplied = true;   // 已连 input，跳过 applyEnabled 首次重连
+  // 保留用户上次的总开关选择；首次默认开。不强制打开，否则关了重启又自己开
+  if (typeof state.enabled !== 'boolean') state.enabled = true;
+  enabledApplied = null;   // 让 applyEnabled 按当前状态接线
   applyAll();
 }
 function installSetSinkHook(el) {
@@ -627,10 +629,24 @@ function toggleSmart(on) {
 }
 
 // ---------------- 快捷开关 ----------------
-function toggleEnabled() {
-  state.enabled = !state.enabled;
+function toggleEnabled(force) {
+  state.enabled = (typeof force === 'boolean') ? force : !state.enabled;
   applyEnabled(); saveState(); updateUI();
-  toast(state.enabled ? '音效已开启' : '音效已关闭 · 原音', state.enabled ? 'ok' : 'off');
+  toast(state.enabled ? '音效已开启' : '音效已关闭 · 原音直通', state.enabled ? 'ok' : 'off');
+}
+// 任何调参动作都把总开关打开，避免「关了以后调半天没反应」
+function autoEnable(e) {
+  if (state.enabled) return;
+  var t = e.target;
+  if (!t || !t.classList) return;
+  var hit = t.classList.contains('ss-rng') || t.classList.contains('ss-sel') || t.classList.contains('ss-knob-r') ||
+    (t.closest && t.closest('.ss-item[data-id]'));
+  if (!hit) return;
+  // 只接线和改按钮，不整屏刷新，否则正在拖的滑块会被重置
+  state.enabled = true;
+  applyEnabled(); saveState();
+  if (ui.pw) { ui.pw.textContent = '● 开'; ui.pw.classList.add('ss-on'); ui.pw.classList.remove('ss-off'); }
+  toast('已自动开启音效', 'ok');
 }
 function bindShortcuts() {
   // 桌面歌词窗/歌词页不绑快捷键，只在主界面生效
@@ -1172,6 +1188,8 @@ function ensureUI() {
   buildLibPage(page(ui.pages, 'lib'));
   switchTab(state.tab === 'presets' ? 'eq' : (state.tab || 'eq'));
   syncBands(); renderUserPresets(); updateUI(); ui.eqDirty = true;
+  // 任何调参动作自动开总开关，避免「关了以后调半天没反应」
+  ['input', 'change', 'click'].forEach(function (ev) { ui.panel.addEventListener(ev, autoEnable, true); });
 }
 
 function togglePanel() {
@@ -1197,11 +1215,11 @@ function updateUI() {
   for (var i = 0; i < btns.length; i++) btns[i].classList.toggle('ss-on', btns[i].getAttribute('data-id') === state.preset);
   var sb = ui.panel.querySelector('.ss-smart'); if (sb) sb.classList.toggle('ss-on', state.smart);
   renderSimple();
-  if (ui.pw) { ui.pw.textContent = state.enabled ? '● 开' : '○ 关'; ui.pw.classList.toggle('ss-on', state.enabled); }
+  if (ui.pw) { ui.pw.textContent = state.enabled ? '● 开' : '○ 关'; ui.pw.classList.toggle('ss-on', state.enabled); ui.pw.classList.toggle('ss-off', !state.enabled); }
   if (ui.btn) ui.btn.classList.toggle('ss-on', state.enabled);
   if (ui.status) {
     var nm = state.preset === 'smart' ? '智能调音' : (state.preset.indexOf('user:') === 0 ? state.preset.slice(5) : (state.preset === 'imported' ? '导入配置' : findPreset(state.preset).name));
-    ui.status.textContent = (state.enabled ? '● 开启' : '○ 原音') + ' · ' + nm + ' · 强度 ' + state.intensity + '%' + (state.smart ? ' · 智能' : '') + (state.ab ? ' · B' : '');
+    ui.status.textContent = (state.enabled ? '● 开启' : '○ 已关闭 · 调参自动开启') + ' · ' + nm + ' · 强度 ' + state.intensity + '%' + (state.smart ? ' · 智能' : '') + (state.ab ? ' · B' : '');
   }
 }
 
